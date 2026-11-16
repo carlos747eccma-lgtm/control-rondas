@@ -22,7 +22,7 @@ let proj = null;           // proyección local en metros
 let watchId = null, wakeLock = null, simTimer = null;
 let editMode = null;       // 'boundary' | 'punto' | 'salida' | null
 let draft = [];
-let lastFixAt = 0, lastRawAcc = null;
+let lastFixAt = Date.now(), lastValidAt = Date.now(), lastRawAcc = null, noFixBanner = false;
 let simClock = null; // reloj acelerado durante la simulación
 const nowT = () => simClock != null ? simClock : Date.now();
 // Centro por defecto: Puerto de Valencia (zona de APM Terminals). El límite exacto se dibuja en la pestaña Patio.
@@ -416,6 +416,8 @@ function onFix(raw) {
   }
   // Hueco sin señal válida (app cerrada, móvil apagado o dentro de un contenedor)
   if (run.lastAcceptT && t - run.lastAcceptT > GAP_MS) logGap(run.lastAcceptT, t);
+  lastValidAt = Date.now();
+  if (noFixBanner) { noFixBanner = false; banner(''); }
   // 3) Suavizado
   const p = kf.step(raw, acc, t); p.t = t; p.acc = acc;
   map.me(p, acc);
@@ -481,7 +483,7 @@ const GAP_MS = 2 * 60000;
 function logGap(from, to) {
   const g = { from, to, dur: to - from, lat: run.last && run.last.lat, lng: run.last && run.last.lng };
   run.gaps = run.gaps || []; run.gaps.push(g);
-  run.events.push({ t: to, txt: 'Sin señal GPS ' + fmtMin(g.dur) + ' (de ' + fmtHM(from) + ' a ' + fmtHM(to) + '): app cerrada, móvil apagado o sin cobertura', k: 'bad', lat: g.lat, lng: g.lng });
+  run.events.push({ t: to, txt: 'Sin señal GPS ' + fmtMin(g.dur) + ' (de ' + fmtHM(from) + ' a ' + fmtHM(to) + '): app en segundo plano o cerrada, móvil apagado o GPS sin precisión', k: 'bad', lat: g.lat, lng: g.lng });
   renderEvents();
 }
 function checkPoints(p, t, acc) {
@@ -618,7 +620,7 @@ function renderHeader() {
   let txt = '—', k = 'idle';
   if (viewing) { txt = 'TURNO GUARDADO'; k = 'idle'; }
   else if (r && !r.end) {
-    if (!simTimer && Date.now() - lastFixAt > 30000) { txt = 'SIN SEÑAL'; k = 'bad'; }
+    if (!simTimer && Date.now() - lastValidAt > 60000) { txt = 'SIN SEÑAL'; k = 'bad'; }
     else if (r.outside) { txt = 'FUERA DEL RECINTO'; k = 'warn'; }
     else if (r.inStop) { txt = 'PARADO ' + fmtMin(now - r.anchor.t); k = r.alarmed ? 'bad' : 'warn'; }
     else { txt = 'EN RONDA'; k = 'ok'; }
@@ -1011,7 +1013,11 @@ function fillCfg() { Object.keys(DEF_CFG).forEach(k => { if ($(k)) $(k).value = 
   setInterval(() => {
     if (run && !run.end && !viewing && !simTimer && nowT() >= run.periodEnd) { finishRun(); startRun(); renderEvents(); }
     checkOverdue(); renderAll();
-    if (run && !run.end && !viewing && !simTimer && Date.now() - lastFixAt > 30000 && watchId != null) banner('Sin señal GPS desde hace ' + fmtDur(Date.now() - lastFixAt) + '. Sal de entre los contenedores para recuperarla.', 'warn');
+    const noFix = Date.now() - lastValidAt;
+    if (run && !run.end && !viewing && !simTimer && watchId != null && noFix > 60000) {
+      noFixBanner = true;
+      banner('Sin posición GPS válida desde hace ' + fmtDur(noFix) + (lastRawAcc != null && lastRawAcc > cfg.maxAcc && Date.now() - lastFixAt < 15000 ? ' (precisión actual ±' + Math.round(lastRawAcc) + ' m, demasiado baja)' : '') + '. Sal de entre los contenedores para recuperarla.', 'warn');
+    } else if (noFixBanner) { noFixBanner = false; banner(''); }
   }, 1000);
   if ('serviceWorker' in navigator && location.protocol.startsWith('http') && !window.Capacitor) navigator.serviceWorker.register('sw.js').catch(() => { });
 })();
