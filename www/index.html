@@ -100,6 +100,12 @@ input,select{width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(
 .cpe{display:flex;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line)}
 .cpe .grow{flex:1;min-width:0}
 #report{display:none}
+.shiftbtn{background:var(--surface2);border:1px solid var(--line);border-radius:8px;padding:3px 8px;font-size:12px;color:var(--txt);white-space:nowrap}
+.shiftbtn.ask{border-color:var(--warn);color:var(--warn);animation:pulse 1.6s infinite}
+.sheet{position:fixed;inset:0;z-index:5000;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center}
+.sheetbox{background:var(--surface);border:1px solid var(--line);border-radius:16px 16px 0 0;padding:16px 14px calc(16px + env(safe-area-inset-bottom));width:100%;max-width:480px;max-height:90vh;overflow:auto}
+.preset{flex:1 1 30%;padding:12px 6px;border-radius:10px;border:1px solid var(--line);background:var(--surface2);font-weight:700;font-size:14px}
+.preset.on{border-color:var(--acc);background:var(--acc-bg);color:#bfdbfe}
 @media print{
   @page{margin:12mm}
   body{background:#fff;color:#111}
@@ -134,7 +140,7 @@ input,select{width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(
     <span id="status" class="pill idle">—</span>
     <span id="clock" class="num">--:--</span>
   </header>
-  <div id="shift"><span id="shiftLbl" class="num">Turno</span><div class="bar"><i id="shiftBar"></i></div><span id="guardLbl"></span></div>
+  <div id="shift"><button id="bShift" class="shiftbtn"><span id="shiftLbl" class="num">Turno</span> <b>▾</b></button><div class="bar"><i id="shiftBar"></i></div><span id="guardLbl"></span></div>
   <section id="kpis">
     <div class="kpi" id="kRounds"><span>Rondas</span><b class="num">0</b><em>&nbsp;</em></div>
     <div class="kpi" id="kComp"><span>Puntos OK</span><b class="num">–</b><em>&nbsp;</em></div>
@@ -193,8 +199,8 @@ input,select{width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(
         <div><label>Paso exigido cada (min)</label><input id="freqMin" type="number" min="5" max="480"></div>
         <div><label>Radio de cada punto (m)</label><input id="cpRad" type="number" min="5" max="50"></div>
       </div>
-      <label>Cambios de turno (horas)</label>
-      <input id="shifts" placeholder="6,14,22">
+      <label>Turnos disponibles (inicio-fin, separados por comas)</label>
+      <input id="presets" placeholder="06-14, 14-22, 22-06">
       <h3>Zona APM y puntos de control (opcionales)</h3>
       <p class="mut" id="yardInfo"></p>
       <div class="row">
@@ -217,7 +223,8 @@ input,select{width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(
       <h3>GPS entre contenedores</h3>
       <div class="grid2">
         <div><label>Precisión máx. aceptada (m)</label><input id="maxAcc" type="number" min="5" max="100"></div>
-        <div><label>Velocidad máx. creíble (km/h)</label><input id="maxSpd" type="number" min="5" max="120"></div>
+        <div><label>Límite de velocidad (km/h)</label><input id="speedLimit" type="number" min="0" max="120"></div>
+        <div><label>Filtro saltos GPS (km/h)</label><input id="jumpSpd" type="number" min="30" max="200"></div>
         <div><label>Segundos quieto = parada</label><input id="stopSec" type="number" min="10" max="600"></div>
         <div><label>Radio de parada (m)</label><input id="stopRad" type="number" min="3" max="30"></div>
         <div><label>Aviso parado más de (min)</label><input id="stopAlarm" type="number" min="0" max="120"></div>
@@ -229,6 +236,15 @@ input,select{width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(
     </div>
   </section>
 </div>
+<div id="shiftSheet" class="sheet" style="display:none"><div class="sheetbox">
+  <h3 style="margin-top:0">Elegir turno</h3>
+  <label>Vigilante</label><input id="sGuard" placeholder="Nombre o número">
+  <div id="presetBtns" class="row"></div>
+  <label>O a mano</label>
+  <div class="grid2"><div><label>Entrada</label><input id="sStart" type="time"></div><div><label>Salida</label><input id="sEnd" type="time"></div></div>
+  <p class="mut">Al empezar un turno nuevo se guarda el anterior en Turnos.</p>
+  <div class="row"><button class="btn grow" id="bShiftCancel">Cancelar</button><button class="btn pri grow" id="bShiftGo">Empezar turno</button></div>
+</div></div>
 <div id="report"></div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="config.js" onerror="0"></script>
