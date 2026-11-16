@@ -344,10 +344,14 @@ function chooseShift() {
   $('shiftSheet').style.display = 'none';
   if (simTimer) return;
   // el turno anterior se guarda si tenía actividad; si estaba recién empezado se descarta
-  if (run && !run.end) { if (elapsed(run) > 2 * 60000 || run.track.length > 5) finishRun(); else { stopGps(); run = null; LS.set('rp_run', null); } }
-  run = null; startRun();
+  // si el seguimiento automático acaba de empezar (sin turno elegido, < 15 min), se incorpora al turno elegido en vez de crear un turno aparte
+  const adopt = run && !run.end && !run.sim && !run.shiftLabel && elapsed(run) < 15 * 60000;
+  if (!adopt) {
+    if (run && !run.end) { if (elapsed(run) > 2 * 60000 || run.track.length > 5) finishRun(); else { stopGps(); run = null; LS.set('rp_run', null); } }
+    run = null; startRun(); run.events = [];
+  }
   run.periodEnd = endTs; run.shiftLabel = label; run.guard = guard;
-  run.events = []; logEv('Inicio de turno ' + label + (guard ? ' · ' + guard : ''), null, 'acc');
+  logEv('Inicio de turno ' + label + (guard ? ' · ' + guard : ''), null, 'acc');
   persist(true); renderEvents(); renderAll();
   banner('Turno ' + label + ' empezado', '', 2500);
 }
@@ -720,7 +724,7 @@ function renderHist() {
     return '<div class="card hist"><div class="score ' + cls + '" style="background:var(--' + (cls === 'idle' ? 'idle' : cls) + '-bg);color:var(--' + (cls === 'idle' ? 'mut' : cls) + ')">' + (c == null ? '–' : c + '%') + '</div>' +
       '<div class="grow"><b>' + (r.shiftLabel ? 'Turno ' + r.shiftLabel + ' · ' : '') + fmtDate(r.start) + ' – ' + fmtHM(r.end) + '</b>' + (r.sim ? ' <span class="pill idle">prueba</span>' : '') +
       '<div class="mut">' + (r.guard ? esc(r.guard) + ' · ' : '') + (r.expected != null ? r.rounds.length + '/' + r.expected + ' rondas · ' : '') + fmtDist(r.dist) + ' · ' + r.stops.length + ' paradas · ' + (r.coverage ?? '–') + '% patio' + ((r.gaps || []).length ? ' · <span style="color:var(--bad)">' + r.gaps.length + ' cortes de señal</span>' : '') + '</div>' +
-      '<div class="row" style="margin:6px 0 0"><button class="btn sm" data-view="' + k + '">Ver en mapa</button><button class="btn sm pri" data-pdf="' + k + '">Enviar PDF</button><button class="btn sm pri" data-xls="' + k + '">Enviar Excel</button></div></div></div>';
+      '<div class="row" style="margin:6px 0 0"><button class="btn sm" data-view="' + k + '">Ver en mapa</button><button class="btn sm pri" data-pdf="' + k + '">PDF de este turno</button><button class="btn sm pri" data-xls="' + k + '">Excel de este turno</button></div></div></div>';
   }).join('') : '<div class="empty">Aún no hay turnos guardados. Cada turno se guarda solo al cambiar de turno.</div>';
 }
 let viewing = null;
@@ -880,7 +884,7 @@ async function sharePdf(r) {
   if (y > 262) { doc.addPage(); y = 20; }
   doc.setDrawColor(0); doc.line(14, y + 16, 90, y + 16); doc.line(120, y + 16, 196, y + 16); doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.text('Firma del vigilante', 14, y + 21); doc.text('Firma del supervisor', 120, y + 21);
   const n = doc.getNumberOfPages(); for (let i = 1; i <= n; i++) { doc.setPage(i); doc.setFontSize(7.5); doc.setTextColor(120); doc.text('Control de Rondas · generado ' + fmtDate(Date.now()) + ' · página ' + i + ' de ' + n, 14, 290); }
-  await shareFile('informe-turno-' + stamp(r.start) + '.pdf', doc.output('blob'), 'Informe de rondas ' + fmtDate(r.start));
+  await shareFile('informe-turno-' + (r.shiftLabel ? r.shiftLabel.replace(/[^0-9]+/g, '-') + '_' : '') + stamp(r.start) + '.pdf', doc.output('blob'), 'Informe de rondas ' + fmtDate(r.start));
 }
 function sheet(rows, widths) {
   const ws = XLSX.utils.aoa_to_sheet(rows);
