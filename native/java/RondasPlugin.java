@@ -72,6 +72,26 @@ public class RondasPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void shipsStart(PluginCall call) {
+        String key = call.getString("key", "");
+        com.getcapacitor.JSArray box = call.getArray("box");
+        if (key == null || key.isEmpty() || box == null) { call.reject("Falta la clave AIS"); return; }
+        ShipFeed.start(key, box);
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void shipsStop(PluginCall call) { ShipFeed.stop(); call.resolve(); }
+
+    @PluginMethod
+    public void ships(PluginCall call) {
+        com.getcapacitor.JSArray a = new com.getcapacitor.JSArray();
+        for (String t : ShipFeed.drain()) a.put(t);
+        JSObject r = new JSObject(); r.put("msgs", a);
+        call.resolve(r);
+    }
+
+    @PluginMethod
     public void drain(PluginCall call) {
         long since = (long) num(call, "since", 0); // ojo: getDouble devuelve el valor por defecto con números enteros grandes (Long)
         java.util.List<double[]> l = GuardService.since(getContext(), since);

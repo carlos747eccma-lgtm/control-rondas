@@ -90,6 +90,7 @@ jobs:
           JAVA
           sed -i 's/^          //' "$F"
           cp native/java/*.java "$(dirname "$F")/"
+          printf "\ndependencies {\n    implementation 'com.squareup.okhttp3:okhttp:4.12.0'\n}\n" >> android/app/build.gradle
           sed -i 's|</application>|    <service android:name=".GuardService" android:enabled="true" android:exported="false" android:foregroundServiceType="location" />\n    </application>|' $M
           cat $M
       - name: Sonido de alarma e icono de notificación

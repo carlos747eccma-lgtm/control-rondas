@@ -112,6 +112,31 @@ const COL = { red: '#ef4444', grn: '#22c55e', amb: '#f59e0b', blu: '#3b82f6', wh
 const STC = { ok: '#16a34a', warn: '#d97706', bad: '#dc2626', idle: '#475569' };
 function spSecs(o) { return o.secs != null ? o.secs : Math.max(1, Math.round((o.to - o.from) / 1000) + 1); }
 function fmtSec(n) { n = Math.round(n); return n < 60 ? n + ' s' : Math.floor(n / 60) + ' min ' + String(n % 60).padStart(2, '0') + ' s'; }
+/* ---------- Barcos (AIS) ---------- */
+const SHIP_T = t => t >= 70 && t <= 79 ? ['Carga', '#22c55e'] : t >= 80 && t <= 89 ? ['Petrolero / tanque', '#ef4444'] : t >= 60 && t <= 69 ? ['Pasaje', '#3b82f6'] : t === 52 ? ['Remolcador', '#06b6d4'] : t === 50 ? ['Práctico', '#06b6d4'] : t === 31 || t === 32 ? ['Remolque', '#06b6d4'] : t === 30 ? ['Pesca', '#eab308'] : t === 35 ? ['Militar', '#a3a3a3'] : t === 36 || t === 37 ? ['Recreo', '#d946ef'] : t >= 40 && t <= 49 ? ['Alta velocidad', '#f97316'] : ['Barco', '#cbd5e1'];
+const NAV_ST = { 0: 'Navegando', 1: 'Fondeado', 2: 'Sin gobierno', 3: 'Maniobra restringida', 5: 'Atracado', 7: 'Pescando', 8: 'Navegando a vela' };
+function shipHdg(s) { return s.hdg != null && s.hdg !== 511 ? s.hdg : s.cog != null && s.cog < 360 ? s.cog : null; }
+// dibuja el casco a escala (metros → píxeles) girado según el rumbo; si no hay medidas, un triángulo
+function shipHtml(s, pxm) {
+  const [, col] = SHIP_T(s.type || 0), h = shipHdg(s), A = s.a || 0, B = s.b || 0, C = s.c || 0, D = s.d || 0;
+  let L = (A + B) * pxm, W = (C + D) * pxm, svg;
+  if (L >= 14 && W >= 3) {
+    const pad = 4, R = Math.hypot(Math.max(A, B), Math.max(C, D)) * pxm + pad, S = 2 * R;
+    const x = v => (R + v * pxm).toFixed(1), y = v => (R + v * pxm).toFixed(1), bw = Math.min((C + D) * 0.9, (A + B) * 0.2);
+    const pts = [[(D - C) / 2, -A], [D, -A + bw], [D, B], [-C, B], [-C, -A + bw]].map(([px, py]) => x(px) + ',' + y(py)).join(' ');
+    svg = '<svg width="' + S + '" height="' + S + '" style="position:absolute;left:' + (-R) + 'px;top:' + (-R) + 'px;transform:rotate(' + (h || 0) + 'deg);overflow:visible"><polygon points="' + pts + '" fill="' + col + '" fill-opacity=".85" stroke="#fff" stroke-width="1.5"/></svg>';
+  } else {
+    svg = h == null ? '<div style="position:absolute;left:-6px;top:-6px;width:12px;height:12px;border-radius:50%;background:' + col + ';border:2px solid #fff"></div>'
+      : '<svg width="22" height="22" style="position:absolute;left:-11px;top:-11px;transform:rotate(' + h + 'deg)"><polygon points="11,1 18,20 11,15 4,20" fill="' + col + '" stroke="#fff" stroke-width="1.5"/></svg>';
+  }
+  const name = s.name ? '<div style="position:absolute;left:0;top:' + Math.max(12, L / 2 + 4) + 'px;transform:translateX(-50%);font:700 10px system-ui;color:#fff;text-shadow:0 0 3px #000,0 0 3px #000;white-space:nowrap;pointer-events:none">' + esc(s.name) + '</div>' : '';
+  return '<div data-mmsi="' + s.mmsi + '" style="position:relative;width:0;height:0;cursor:pointer">' + svg + name + '</div>';
+}
+function shipInfo(mmsi) {
+  const s = ships[mmsi]; if (!s) return;
+  const [tipo] = SHIP_T(s.type || 0), st = NAV_ST[s.nav], L = (s.a || 0) + (s.b || 0);
+  banner((s.name || 'MMSI ' + s.mmsi) + ' · ' + tipo + (L ? ' · ' + L + ' m' : '') + ' · ' + (st || (s.sog > 0.5 ? 'En movimiento' : 'Parado')) + (s.sog > 0.5 ? ' ' + s.sog.toFixed(1) + ' nudos' : '') + (s.dest ? ' · Destino ' + s.dest : '') + ' · visto ' + fmtHM(s.t), '', 7000);
+}
 function spHtml(o) { return '<div style="transform:translate(-50%,-50%);background:#dc2626;color:#fff;font:700 11px system-ui;padding:2px 6px;border-radius:6px;border:2px solid #fff;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,.5)">⚡ ' + o.max + ' km/h · ' + spSecs(o) + ' s · ' + fmtHM(o.from) + '</div>'; }
 function cpHtml(e) {
   const r = e.type === 'salida' ? '4px' : '50%';
@@ -148,6 +173,7 @@ function LeafletAdapter() {
     L.DomUtil.setPosition(canvas, m.containerPointToLayerPoint([0, 0]));
     drawCoverage(canvas.getContext('2d'), p => m.latLngToContainerPoint([p.lat, p.lng]), s.x, s.y);
   }
+  let gShips = null, shipList = [];
   function cov() { if (!covT) covT = setTimeout(paint, 300); }
   return {
     name: 'leaflet',
@@ -176,12 +202,17 @@ function LeafletAdapter() {
     },
     stops(list) { gStops.clearLayers(); list.forEach(s => s.sp ? L.marker([s.lat, s.lng], { icon: L.divIcon({ className: '', iconSize: null, html: spHtml(s) }) }).addTo(gStops) : L.circleMarker([s.lat, s.lng], { radius: 6 + Math.min(10, s.dur / 60000), color: '#000', weight: 1, fillColor: COL.amb, fillOpacity: .95 }).bindTooltip(fmtDur(s.dur) + ' parado').addTo(gStops)); },
     points(list) { gExits.clearLayers(); list.forEach(e => L.marker([e.lat, e.lng], { icon: L.divIcon({ className: '', iconSize: null, html: cpHtml(e) }) }).on('click', () => focusPoint(e.id)).addTo(gExits)); },
-    draft(pts) { gDraft.clearLayers(); if (pts.length) { L.polyline(pts.map(p => [p.lat, p.lng]), { color: COL.amb, weight: 3 }).addTo(gDraft); pts.forEach(p => L.circleMarker([p.lat, p.lng], { radius: 5, color: COL.amb, fillOpacity: 1 }).addTo(gDraft)); } }
+    draft(pts) { gDraft.clearLayers(); if (pts.length) { L.polyline(pts.map(p => [p.lat, p.lng]), { color: COL.amb, weight: 3 }).addTo(gDraft); pts.forEach(p => L.circleMarker([p.lat, p.lng], { radius: 5, color: COL.amb, fillOpacity: 1 }).addTo(gDraft)); } },
+    ships(list) {
+      if (!gShips) { gShips = L.layerGroup().addTo(m); m.on('zoomend', () => this.ships(shipList)); } shipList = list; gShips.clearLayers();
+      const c = m.getCenter(), pxm = Math.pow(2, m.getZoom()) / (156543.03 * Math.cos(c.lat * Math.PI / 180));
+      list.forEach(s => L.marker([s.lat, s.lng], { icon: L.divIcon({ className: '', iconSize: null, html: shipHtml(s, pxm) }), zIndexOffset: -100 }).on('click', () => shipInfo(s.mmsi)).addTo(gShips));
+    }
   };
 }
 
 function GoogleAdapter(key) {
-  let m, boundary, track, me, meAcc, stopsList = [], draftArr = [], ov, ptsOv, ptsList = [], covT = 0;
+  let m, boundary, track, me, meAcc, stopsList = [], draftArr = [], ov, ptsOv, ptsList = [], covT = 0, shipOv, shipList = [];
   function cov() { if (!covT) covT = setTimeout(() => { covT = 0; ov && ov.draw(); }, 300); }
   const LL = p => ({ lat: p.lat, lng: p.lng });
   return {
@@ -212,6 +243,15 @@ function GoogleAdapter(key) {
             this.d.innerHTML = stopsList.map(s => { if (s.sp) { const q = pr.fromLatLngToDivPixel(new google.maps.LatLng(s.lat, s.lng)); return '<div style="position:absolute;left:' + q.x + 'px;top:' + q.y + 'px">' + spHtml(s) + '</div>'; } const q = pr.fromLatLngToDivPixel(new google.maps.LatLng(s.lat, s.lng)), r = 6 + Math.min(10, s.dur / 60000); return '<div title="' + fmtDur(s.dur) + ' parado" style="position:absolute;left:' + (q.x - r) + 'px;top:' + (q.y - r) + 'px;width:' + 2 * r + 'px;height:' + 2 * r + 'px;border-radius:50%;background:#f59e0b;border:1px solid #000;opacity:.95"></div>'; }).join('') + ptsList.map(e => { const q = pr.fromLatLngToDivPixel(new google.maps.LatLng(e.lat, e.lng)); return '<div data-pid="' + e.id + '" style="position:absolute;left:' + q.x + 'px;top:' + q.y + 'px;cursor:pointer">' + cpHtml(e) + '</div>'; }).join('');
           };
           ptsOv.setMap(m);
+          // barcos (AIS) debajo del recorrido y de los avisos
+          shipOv = new google.maps.OverlayView();
+          shipOv.onAdd = function () { this.d = document.createElement('div'); this.d.style.cssText = 'position:absolute;left:0;top:0'; this.d.onclick = e => { const el = e.target.closest('[data-mmsi]'); if (el) { e.stopPropagation(); shipInfo(el.dataset.mmsi); } }; this.getPanes().overlayMouseTarget.prepend(this.d); };
+          shipOv.draw = function () {
+            const pr = this.getProjection(); if (!pr || !this.d) return;
+            const c = m.getCenter(), a = pr.fromLatLngToDivPixel(c), b = pr.fromLatLngToDivPixel(new google.maps.LatLng(c.lat() + 100 / 111320, c.lng())), pxm = Math.abs(a.y - b.y) / 100;
+            this.d.innerHTML = shipList.map(s => { const q = pr.fromLatLngToDivPixel(new google.maps.LatLng(s.lat, s.lng)); return '<div style="position:absolute;left:' + q.x + 'px;top:' + q.y + 'px">' + shipHtml(s, pxm) + '</div>'; }).join('');
+          };
+          shipOv.setMap(m);
           m.addListener('idle', () => ov.draw());
           res();
         };
@@ -237,9 +277,56 @@ function GoogleAdapter(key) {
     },
     stops(list) { stopsList = list; if (ptsOv) ptsOv.draw(); },
     points(list) { ptsList = list; if (ptsOv) ptsOv.draw(); },
+    ships(list) { shipList = list; if (shipOv) shipOv.draw(); },
     draft(pts) { draftArr.forEach(x => x.setMap(null)); draftArr = []; if (pts.length) { draftArr.push(new google.maps.Polyline({ map: m, path: pts.map(LL), strokeColor: COL.amb, strokeWeight: 3, clickable: false })); pts.forEach(p => draftArr.push(new google.maps.Marker({ map: m, position: LL(p), clickable: false, icon: { path: google.maps.SymbolPath.CIRCLE, scale: 5, fillColor: COL.amb, fillOpacity: 1, strokeWeight: 0 } }))); } }
   };
 }
+
+/* Fuente AIS: en la APK por el servicio nativo (aisstream.io); en navegador, WebSocket directo */
+const AIS_KEY = window.RONDAS_AIS_KEY || '';
+let ships = {}, shipsOn = LS.get('rp_ships', true), shipWs = null, shipPoll = null;
+function aisBox() {
+  const b = yard.boundary; let la0 = 39.425, la1 = 39.452, ln0 = -0.335, ln1 = -0.300; // zona de APM / muelle Príncipe Felipe
+  if (b && b.length >= 3) { la0 = Math.min(...b.map(p => p.lat)); la1 = Math.max(...b.map(p => p.lat)); ln0 = Math.min(...b.map(p => p.lng)); ln1 = Math.max(...b.map(p => p.lng)); }
+  const m = 0.012; return [[la0 - m, ln0 - m], [la1 + m, ln1 + m]];
+}
+function shipMsg(o) {
+  const md = o.MetaData || {}, id = String(md.MMSI || ''); if (!id) return;
+  const s = ships[id] || (ships[id] = { mmsi: id });
+  if (md.ShipName && md.ShipName.trim()) s.name = md.ShipName.trim();
+  const m = o.Message || {}, pr = m.PositionReport || m.StandardClassBPositionReport || m.ExtendedClassBPositionReport, sd = m.ShipStaticData || (m.StaticDataReport && m.StaticDataReport.ReportB);
+  if (pr) { s.lat = pr.Latitude; s.lng = pr.Longitude; s.sog = pr.Sog; s.cog = pr.Cog; s.hdg = pr.TrueHeading; if (pr.NavigationalStatus != null) s.nav = pr.NavigationalStatus; s.t = Date.now(); }
+  else if (md.latitude != null && s.lat == null) { s.lat = md.latitude; s.lng = md.longitude; s.t = Date.now(); }
+  if (sd) { if (sd.Type != null || sd.ShipType != null) s.type = sd.Type != null ? sd.Type : sd.ShipType; const d = sd.Dimension; if (d) { s.a = d.A; s.b = d.B; s.c = d.C; s.d = d.D; } if (sd.Destination) s.dest = String(sd.Destination).trim(); if (sd.Name && sd.Name.trim()) s.name = sd.Name.trim(); }
+}
+function drawShips() {
+  const now = Date.now(); Object.keys(ships).forEach(k => { if (!ships[k].t || now - ships[k].t > 40 * 60000) delete ships[k]; });
+  const list = shipsOn ? Object.values(ships).filter(s => s.lat != null && Math.abs(s.lat) <= 90) : [];
+  if (map && map.ships) map.ships(list);
+  $('shipsN').textContent = shipsOn && list.length ? ' ' + list.length : '';
+}
+function startShips() {
+  if (!AIS_KEY || !shipsOn) return;
+  if (RN && RN.shipsStart) {
+    RN.shipsStart({ key: AIS_KEY, box: aisBox() }).catch(() => { });
+    if (!shipPoll) shipPoll = setInterval(async () => { try { const r = await RN.ships(); (r.msgs || []).forEach(t => { try { shipMsg(JSON.parse(t)); } catch (e) { } }); drawShips(); } catch (e) { } }, 4000);
+    return;
+  }
+  if (shipWs) return;
+  try {
+    shipWs = new WebSocket('wss://stream.aisstream.io/v0/stream');
+    shipWs.onopen = () => shipWs.send(JSON.stringify({ APIKey: AIS_KEY, BoundingBoxes: [aisBox()] }));
+    shipWs.onmessage = async e => { try { shipMsg(JSON.parse(typeof e.data === 'string' ? e.data : await e.data.text())); } catch (x) { } };
+    shipWs.onclose = () => { shipWs = null; if (shipsOn) setTimeout(startShips, 15000); };
+  } catch (e) { shipWs = null; }
+  if (!shipPoll) shipPoll = setInterval(drawShips, 4000);
+}
+function stopShips() {
+  if (RN && RN.shipsStop) RN.shipsStop().catch(() => { });
+  if (shipWs) { const w = shipWs; shipWs = null; w.onclose = null; w.close(); }
+  clearInterval(shipPoll); shipPoll = null; drawShips();
+}
+document.addEventListener('visibilitychange', () => { if (!AIS_KEY) return; if (document.visibilityState === 'visible') startShips(); else if (RN) RN.shipsStop && RN.shipsStop().catch(() => { }); });
 
 let map;
 async function initMap() {
@@ -1083,6 +1170,8 @@ function bind() {
   };
   $('evList').onclick = e => { const li = e.target.closest('[data-go]'); if (li) { const [lat, lng] = li.dataset.go.split(',').map(Number); map.center({ lat, lng }, 19); } };
   const cur = () => viewing ? viewing.live : run;
+  if (AIS_KEY) { $('ships').hidden = false; $('ships').classList.toggle('on', shipsOn); }
+  $('ships').onclick = () => { shipsOn = !shipsOn; LS.set('rp_ships', shipsOn); $('ships').classList.toggle('on', shipsOn); if (shipsOn) { startShips(); banner('Barcos en tiempo real activados (pueden tardar unos minutos en aparecer)', '', 4000); } else stopShips(); };
   $('bBeep').onclick = () => { if (RN) { RN.test(); banner('Apaga la pantalla: en 10 s suena la alarma de prueba', '', 8000); return; } SND.alarm(); notify([{ id: 9199, at: Date.now() + 10000, title: 'Prueba de alarma', body: 'Así suena la alarma con la pantalla apagada' }]); if (LN) banner('Apaga la pantalla: en 10 s suena la alarma de prueba', '', 8000); };
   $('bReportNow').onclick = () => sharePdf(cur()).catch(err => banner('No se pudo crear el PDF: ' + err.message, 'bad', 5000));
   $('bXlsNow').onclick = () => shareXlsx(cur()).catch(err => banner('No se pudo crear el Excel: ' + err.message, 'bad', 5000));
@@ -1118,7 +1207,7 @@ function fillCfg() { Object.keys(DEF_CFG).forEach(k => { if ($(k)) $(k).value = 
     if (saved && !saved.end) { run = Object.assign(newRun(), saved); redrawYard(); finishRun(); }
     run = null; startRun();
   }
-  renderEvents(); renderHist(); renderAll();
+  renderEvents(); renderHist(); renderAll(); startShips();
   setInterval(() => {
     if (run && !run.end && !viewing && !simTimer && nowT() >= run.periodEnd) { finishRun(); startRun(); renderEvents(); }
     checkOverdue(); renderAll();
