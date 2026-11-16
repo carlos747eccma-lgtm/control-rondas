@@ -25,6 +25,9 @@ Los contenedores rebotan la señal y el GPS "salta". La app:
 5. Avisa si lleva 30 s sin señal válida.
 Todos estos valores se ajustan en la pestaña Ajustes.
 
+## Contraseña
+La pestaña Configurar (límite de la zona APM, puntos de control y ajustes) está protegida con la contraseña **1490**.
+
 ## Primer uso
 1. Pestaña **Configurar** → "Dibujar límite": toca el mapa en cada esquina del recinto → "Terminar límite".
 2. "+ Punto de control" y "+ Salida exterior" tocando el mapa.

@@ -148,7 +148,7 @@ input,select{width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(
     <div id="banner"></div>
     <button id="locate" title="Centrar en mi posición" aria-label="Centrar en mi posición"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#e8edf6" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg></button>
     <div class="mapchips">
-      <div class="chipbox"><span><i style="background:var(--bad)"></i>Sin vigilar</span><span><i style="background:var(--acc)"></i>Recorrido</span><span><i style="background:var(--ok);border-radius:50%"></i>Punto al día</span></div>
+      <div class="chipbox"><span><i style="background:var(--bad)"></i>Sin vigilar</span><span><i style="background:var(--acc)"></i>Recorrido</span><span><i style="background:var(--warn);border-radius:50%"></i>Parada</span></div>
       <div class="chipbox" id="gpsdot">GPS —</div>
     </div>
   </div>
@@ -161,7 +161,7 @@ input,select{width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(
     </nav>
     <div id="pControl" class="pane on">
       <div class="round" id="roundBox"></div>
-      <h3>Puntos de control</h3>
+      <h3 id="cpHead">Puntos de control</h3>
       <div id="cpList"></div>
     </div>
     <div id="pLog" class="pane">
@@ -181,6 +181,13 @@ input,select{width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(
     <div id="pConfig" class="pane">
       <h3>Vigilante</h3>
       <input id="guard" placeholder="Nombre o número de vigilante">
+      <h3>Zona protegida</h3>
+      <div id="lockBox">
+        <p class="mut">El límite de la zona APM, los puntos de control y los ajustes solo los puede cambiar el responsable.</p>
+        <div class="row"><input id="pin" type="password" inputmode="numeric" maxlength="8" placeholder="Contraseña" style="flex:1;width:auto"><button class="btn pri" id="bUnlock">Entrar</button></div>
+      </div>
+      <div id="cfgBody" style="display:none">
+      <div class="row"><button class="btn sm" id="bLock">🔒 Cerrar configuración</button></div>
       <h3>Rondas</h3>
       <div class="grid2">
         <div><label>Paso exigido cada (min)</label><input id="freqMin" type="number" min="5" max="480"></div>
@@ -188,10 +195,10 @@ input,select{width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(
       </div>
       <label>Cambios de turno (horas)</label>
       <input id="shifts" placeholder="6,14,22">
-      <h3>Patio y puntos de control</h3>
+      <h3>Zona APM y puntos de control (opcionales)</h3>
       <p class="mut" id="yardInfo"></p>
       <div class="row">
-        <button class="btn sm" id="bDraw">Dibujar límite</button>
+        <button class="btn sm pri" id="bDraw">Dibujar límite zona APM</button>
         <button class="btn sm" id="bPoint">+ Punto de control</button>
         <button class="btn sm" id="bExit">+ Salida exterior</button>
       </div>
@@ -218,9 +225,7 @@ input,select{width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(
       </div>
       <input id="cellSize" type="hidden">
       <div class="row"><button class="btn pri grow" id="bSave">Guardar configuración</button></div>
-      <h3>Pruebas</h3>
-      <p class="mut">Guarda el turno actual y simula 3 rondas con errores de GPS sobre un patio de ejemplo.</p>
-      <div class="row"><button class="btn sm" id="bDemo">Patio de ejemplo aquí</button><button class="btn sm" id="bSim">Simular rondas</button></div>
+      </div>
     </div>
   </section>
 </div>

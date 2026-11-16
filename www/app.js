@@ -12,6 +12,9 @@ cfg.gkey = window.RONDAS_GOOGLE_KEY || ''; // la clave solo se define en config.
 let yard = LS.get('rp_yard', { boundary: [], points: [] });
 // migra las salidas de la versión anterior a puntos de control
 if (!yard.points) { yard.points = (yard.exits || []).map((e, k) => ({ id: 'x' + k, name: e.name, type: 'salida', lat: e.lat, lng: e.lng })); delete yard.exits; }
+// Limpieza: quita el patio y los puntos de ejemplo de versiones anteriores
+if (yard.points.some(p => /^d/.test(p.id))) { yard = { boundary: [], points: [] }; LS.set('rp_yard', yard); }
+try { const h0 = LS.get('rp_hist', []); if (h0.some(r => r.sim)) LS.set('rp_hist', h0.filter(r => !r.sim)); } catch (e) { }
 let run = null;            // ronda en curso
 let cells = [];            // zonas de la cuadrícula
 let cellIdx = new Map();   // "i,j" -> celda
@@ -261,7 +264,7 @@ function fmtDate(t) { return new Date(t).toLocaleString('es-ES', { day: '2-digit
 let bannerT;
 function banner(msg, kind, ms) { const b = $('banner'); b.textContent = msg; b.className = kind || ''; b.style.display = msg ? 'block' : 'none'; clearTimeout(bannerT); if (ms) bannerT = setTimeout(() => { b.style.display = 'none'; }, ms); }
 function vibrate(p) { try { navigator.vibrate && navigator.vibrate(p); } catch (e) { } }
-function setKpi(id, val, sub, cls) { const el = $(id); el.querySelector('b').textContent = val; el.querySelector('em').textContent = sub || ' '; el.className = 'kpi' + (el.classList.contains('xl') ? ' xl' : '') + (cls ? ' ' + cls : ''); }
+function setKpi(id, val, sub, cls, label) { const el = $(id); if (label) el.querySelector('span').textContent = label; el.querySelector('b').textContent = val; el.querySelector('em').textContent = sub || ' '; el.className = 'kpi' + (el.classList.contains('xl') ? ' xl' : '') + (cls ? ' ' + cls : ''); }
 
 /* ---------- Patio: límite y puntos de control ---------- */
 function shortName(cp, k) { return cp.type === 'salida' ? 'S' + (yard.points.filter((c, i) => c.type === 'salida' && i <= k).length) : 'P' + (yard.points.filter((c, i) => c.type !== 'salida' && i <= k).length); }
@@ -505,7 +508,7 @@ window.addEventListener('pagehide', () => { if (run && !run.end && !viewing) per
 /* ---------- Simulación ---------- */
 function stopSim() { if (simTimer) clearInterval(simTimer); simTimer = null; }
 function simulate(speedMs) {
-  if (yard.boundary.length < 3 || !yard.points.length) demoYard();
+  if (yard.boundary.length < 3) demoYard();
   if (viewing) backToLive();
   if (run && !run.end) finishRun();
   stopGps(); simClock = Date.now(); startRun(true);
@@ -565,10 +568,16 @@ function renderHeader() {
   $('guardLbl').textContent = r.guard ? '👤 ' + r.guard : '';
   // KPIs
   const exp = expectedRounds(r), comp = compliance(r);
-  setKpi('kRounds', String(r.rounds.length), exp != null ? 'de ' + exp + ' exigidas' : 'sin puntos', comp == null ? '' : comp >= 100 ? 'ok' : comp >= 60 ? 'warn' : 'bad');
   const pts = yard.points, sts = pts.map(c => cpStatus(c, r));
   const okN = sts.filter(s => s.k === 'ok' || s.k === 'warn').length, badN = sts.filter(s => s.k === 'bad').length;
-  setKpi('kComp', pts.length ? okN + '/' + pts.length : '–', badN ? badN + ' atrasados' : pts.length ? 'todo en orden' : '', !pts.length ? '' : badN ? 'bad' : sts.some(s => s.k === 'warn') ? 'warn' : 'ok');
+  if (pts.length) {
+    setKpi('kRounds', String(r.rounds.length), 'de ' + exp + ' exigidas', comp >= 100 ? 'ok' : comp >= 60 ? 'warn' : 'bad', 'Rondas');
+    setKpi('kComp', okN + '/' + pts.length, badN ? badN + ' atrasados' : 'todo en orden', badN ? 'bad' : sts.some(s => s.k === 'warn') ? 'warn' : 'ok', 'Puntos OK');
+  } else {
+    setKpi('kRounds', fmtDist(r.dist), 'recorridos', '', 'Recorrido');
+    const g = (r.gaps || []).length;
+    setKpi('kComp', g ? fmtMin(gapMs(r)) : '0 min', g ? g + (g === 1 ? ' corte' : ' cortes') : 'sin cortes', g ? 'bad' : 'ok', 'Sin señal');
+  }
   const c = covPct();
   setKpi('kCov', c == null ? '–' : c + '%', c == null ? 'sin límite' : 'del patio', c == null ? '' : c >= 80 ? 'ok' : c >= 50 ? 'warn' : 'bad');
   setKpi('kStop', fmtDur(stoppedMs(r)), r.stops.length + (r.stops.length === 1 ? ' parada' : ' paradas'), r.inStop ? 'warn' : '');
@@ -581,8 +590,20 @@ function renderControl() {
   if (!r) return;
   const pts = yard.points;
   const box = $('roundBox');
+  $('cpHead').style.display = pts.length ? '' : 'none';
   if (!pts.length) {
-    box.innerHTML = '<div class="hd">Sin puntos de control</div><div class="sub">Añádelos en Configurar para controlar el paso por cada zona. Mientras, se registra el recorrido y el patio vigilado.</div>';
+    const c = covPct(), longS = r.stops.filter(s => cfg.stopAlarm && s.dur >= cfg.stopAlarm * 60000).length, g = (r.gaps || []).length;
+    box.innerHTML = yard.boundary.length < 3
+      ? '<div class="hd">Falta el límite de la zona APM</div><div class="sub">El responsable debe dibujarlo en Configurar (con contraseña). Mientras, se registra el recorrido, las paradas y los cortes de señal.</div>'
+      : '<div class="hd"><span>Vigilancia de la zona APM</span><span class="num">' + c + '%</span></div><div class="prog"><i style="width:' + c + '%;background:' + (c >= 80 ? 'var(--ok)' : c >= 50 ? 'var(--warn)' : 'var(--bad)') + '"></i></div>' +
+        '<div class="sub">' + (c >= 100 ? 'Toda la zona recorrida.' : 'Quedan en rojo las zonas entre contenedores por las que aún no se ha pasado (' + (100 - c) + '%).') + '</div>';
+    $('cpList').innerHTML = '<div class="kv" style="margin-top:12px">' +
+      '<div>Paradas</div><div>' + r.stops.length + ' · ' + fmtDur(stoppedMs(r)) + '</div>' +
+      '<div>Paradas largas (más de ' + cfg.stopAlarm + ' min)</div><div style="color:' + (longS ? 'var(--bad)' : 'var(--ok)') + '">' + longS + '</div>' +
+      '<div>Cortes de señal GPS</div><div style="color:' + (g ? 'var(--bad)' : 'var(--ok)') + '">' + g + (g ? ' · ' + fmtMin(gapMs(r)) : '') + '</div>' +
+      '<div>Última posición válida</div><div>' + (r.lastAcceptT ? fmtAgo(nowT() - r.lastAcceptT) : '—') + '</div></div>';
+    if (lastSig !== 'none') { lastSig = 'none'; map.points([]); }
+    return;
   } else {
     const done = pts.filter(c => r.roundVisited[c.id]).length, miss = pts.filter(c => !r.roundVisited[c.id]);
     const last = r.rounds[r.rounds.length - 1];
@@ -628,10 +649,10 @@ function renderEvents() {
 function renderHist() {
   const h = LS.get('rp_hist', []);
   $('histList').innerHTML = h.length ? h.map((r, k) => {
-    const c = r.compliance, cls = c == null ? 'idle' : c >= 100 ? 'ok' : c >= 60 ? 'warn' : 'bad';
+    const c = r.compliance != null ? r.compliance : r.coverage, cls = c == null ? 'idle' : c >= (r.compliance != null ? 100 : 80) ? 'ok' : c >= 50 ? 'warn' : 'bad';
     return '<div class="card hist"><div class="score ' + cls + '" style="background:var(--' + (cls === 'idle' ? 'idle' : cls) + '-bg);color:var(--' + (cls === 'idle' ? 'mut' : cls) + ')">' + (c == null ? '–' : c + '%') + '</div>' +
       '<div class="grow"><b>' + fmtDate(r.start) + ' – ' + fmtHM(r.end) + '</b>' + (r.sim ? ' <span class="pill idle">prueba</span>' : '') +
-      '<div class="mut">' + (r.guard ? esc(r.guard) + ' · ' : '') + r.rounds.length + '/' + (r.expected ?? '–') + ' rondas · ' + fmtDist(r.dist) + ' · ' + r.stops.length + ' paradas · ' + (r.coverage ?? '–') + '% patio' + ((r.gaps || []).length ? ' · <span style="color:var(--bad)">' + r.gaps.length + ' cortes de señal</span>' : '') + '</div>' +
+      '<div class="mut">' + (r.guard ? esc(r.guard) + ' · ' : '') + (r.expected != null ? r.rounds.length + '/' + r.expected + ' rondas · ' : '') + fmtDist(r.dist) + ' · ' + r.stops.length + ' paradas · ' + (r.coverage ?? '–') + '% patio' + ((r.gaps || []).length ? ' · <span style="color:var(--bad)">' + r.gaps.length + ' cortes de señal</span>' : '') + '</div>' +
       '<div class="row" style="margin:6px 0 0"><button class="btn sm" data-view="' + k + '">Ver en mapa</button><button class="btn sm pri" data-pdf="' + k + '">Enviar PDF</button><button class="btn sm pri" data-xls="' + k + '">Enviar Excel</button></div></div></div>';
   }).join('') : '<div class="empty">Aún no hay turnos guardados. Cada turno se guarda solo al cambiar de turno.</div>';
 }
@@ -706,14 +727,15 @@ async function sharePdf(r) {
   doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.text('Informe de rondas de vigilancia', 14, 16);
   doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5);
   doc.text($('siteName').textContent + (r.sim ? '  ·  SIMULACIÓN' : '') + '  ·  ' + fmtDate(r.start) + ' – ' + fmtDate(end), 14, 22);
-  doc.text('Vigilante: ' + (r.guard || '—') + '  ·  Paso exigido cada ' + cfg.freqMin + ' min por ' + runPoints(r).length + ' puntos', 14, 27);
+  doc.text('Vigilante: ' + (r.guard || '—') + (runPoints(r).length ? '  ·  Paso exigido cada ' + cfg.freqMin + ' min por ' + runPoints(r).length + ' puntos' : '  ·  Vigilancia de la zona APM entre contenedores'), 14, 27);
   const gaps = (r.gaps || []).length;
-  const ok = S.comp != null && S.comp >= 100 && !S.longStops.length && !gaps;
+  const lowCov = S.cov != null && S.cov < 80;
+  const ok = (S.comp == null || S.comp >= 100) && !S.longStops.length && !gaps && !lowCov;
   doc.setFillColor(...(ok ? [220, 252, 231] : [254, 226, 226])); doc.roundedRect(14, 31, 182, 10, 2, 2, 'F');
   doc.setFont('helvetica', 'bold'); doc.setTextColor(...(ok ? GRN : RED));
-  doc.text(ok ? 'TURNO CORRECTO: rondas completas, sin paradas largas ni cortes de señal' : 'REVISAR: ' + [S.comp != null && S.comp < 100 ? 'faltan rondas' : '', S.longStops.length ? S.longStops.length + ' paradas largas' : '', gaps ? gaps + ' cortes de señal' : '', S.late.length ? S.late.length + ' puntos con retraso' : ''].filter(Boolean).join(' · '), 17, 37.5);
+  doc.text(ok ? 'TURNO CORRECTO: zona recorrida, sin paradas largas ni cortes de señal' : 'REVISAR: ' + [S.comp != null && S.comp < 100 ? 'faltan rondas' : '', S.longStops.length ? S.longStops.length + ' paradas largas' : '', gaps ? gaps + ' cortes de señal' : '', S.late.length ? S.late.length + ' puntos con retraso' : '', lowCov ? 'zona vigilada solo ' + S.cov + '%' : ''].filter(Boolean).join(' · '), 17, 37.5);
   doc.setTextColor(0);
-  const kp = [['Rondas', r.rounds.length + ' / ' + (S.exp ?? '–')], ['Cumplimiento', (S.comp ?? '–') + '%'], ['Patio vigilado', (S.cov ?? '–') + '%'], ['Tiempo parado', fmtDur(stoppedMs(r))], ['Recorrido', fmtDist(r.dist)], ['Duración', fmtDur(elapsed(r))], ['Paradas', String(r.stops.length)], ['Sin señal GPS', fmtDur(gapMs(r))]];
+  const kp = [S.exp != null ? ['Rondas', r.rounds.length + ' / ' + S.exp] : ['Cortes de señal', String(gaps)], S.comp != null ? ['Cumplimiento', S.comp + '%'] : ['Paradas largas', String(S.longStops.length)], ['Patio vigilado', (S.cov ?? '–') + '%'], ['Tiempo parado', fmtDur(stoppedMs(r))], ['Recorrido', fmtDist(r.dist)], ['Duración', fmtDur(elapsed(r))], ['Paradas', String(r.stops.length)], ['Sin señal GPS', fmtDur(gapMs(r))]];
   kp.forEach(([k, v], i) => { const x = 14 + (i % 4) * 46, y = 45 + Math.floor(i / 4) * 15; doc.setDrawColor(200); doc.roundedRect(x, y, 44, 13, 1.5, 1.5); doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.text(k, x + 2.5, y + 4.5); doc.setFont('helvetica', 'bold'); doc.setFontSize(12); doc.text(v, x + 2.5, y + 10.5); });
   let y = 80;
   const tbl = (title, head, body, colorCol) => {
@@ -724,10 +746,10 @@ async function sharePdf(r) {
     y = doc.lastAutoTable.finalY + 8;
   };
   const row = (arr, c) => { arr._c = c; return arr; };
-  tbl('Control de paso por puntos', ['Punto', 'Pasos', 'Último paso', 'Mayor tiempo sin pasar'], runPoints(r).map(c => { const g = maxGap(c, r), last = r.lastPass[c.id]; return row([c.name + (c.type === 'salida' ? ' (salida)' : ''), String(r.passes.filter(p => p.id === c.id).length), last ? fmtTime(last) : 'nunca', fmtMin(g)], g > due ? RED : GRN); }), 3);
+  if (runPoints(r).length) tbl('Control de paso por puntos', ['Punto', 'Pasos', 'Último paso', 'Mayor tiempo sin pasar'], runPoints(r).map(c => { const g = maxGap(c, r), last = r.lastPass[c.id]; return row([c.name + (c.type === 'salida' ? ' (salida)' : ''), String(r.passes.filter(p => p.id === c.id).length), last ? fmtTime(last) : 'nunca', fmtMin(g)], g > due ? RED : GRN); }), 3);
   tbl('Incidencias', ['Hora', 'Detalle'], r.events.filter(e => e.k === 'bad' || e.k === 'warn').map(e => row([fmtTime(e.t), e.txt], e.k === 'bad' ? RED : AMB)), 1);
   tbl('Paradas', ['Nº', 'Desde', 'Hasta', 'Duración', 'Posición'], r.stops.map((s, k) => row([String(k + 1), fmtTime(s.from), fmtTime(s.to), fmtMin(s.dur), s.lat.toFixed(5) + ', ' + s.lng.toFixed(5)], cfg.stopAlarm && s.dur >= cfg.stopAlarm * 60000 ? RED : null)), 3);
-  tbl('Rondas completas', ['Nº', 'Inicio', 'Fin', 'Duración'], r.rounds.map(x => [String(x.n), fmtTime(x.start), fmtTime(x.end), fmtMin(x.dur)]));
+  if (runPoints(r).length) tbl('Rondas completas', ['Nº', 'Inicio', 'Fin', 'Duración'], r.rounds.map(x => [String(x.n), fmtTime(x.start), fmtTime(x.end), fmtMin(x.dur)]));
   if (y > 262) { doc.addPage(); y = 20; }
   doc.setDrawColor(0); doc.line(14, y + 16, 90, y + 16); doc.line(120, y + 16, 196, y + 16); doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.text('Firma del vigilante', 14, y + 21); doc.text('Firma del supervisor', 120, y + 21);
   const n = doc.getNumberOfPages(); for (let i = 1; i <= n; i++) { doc.setPage(i); doc.setFontSize(7.5); doc.setTextColor(120); doc.text('Control de Rondas · generado ' + fmtDate(Date.now()) + ' · página ' + i + ' de ' + n, 14, 290); }
@@ -790,21 +812,25 @@ function toCsv(r) {
 }
 
 /* ---------- Pestañas y eventos ---------- */
-function switchTab(id) { document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.p === id)); document.querySelectorAll('.pane').forEach(p => p.classList.toggle('on', p.id === id)); }
+const PIN = '1490';
+function setLocked(v) { $('lockBox').style.display = v ? '' : 'none'; $('cfgBody').style.display = v ? 'none' : ''; if (v && editMode) { draft = []; endEdit(); map.draft([]); } }
+function switchTab(id) {
+  if (id !== 'pConfig') setLocked(true); document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.p === id)); document.querySelectorAll('.pane').forEach(p => p.classList.toggle('on', p.id === id)); }
 function startEdit(mode, msg) { editMode = mode; document.body.classList.add('mode-edit'); banner(msg, 'warn'); }
 function endEdit() { editMode = null; document.body.classList.remove('mode-edit'); $('drawRow').style.display = 'none'; banner(''); }
 function bind() {
   document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => switchTab(b.dataset.p));
   $('guard').onchange = () => { const g = $('guard').value.trim(); LS.set('rp_guard', g); if (run && !run.end && !viewing) { run.guard = g; logEv('Vigilante: ' + (g || '—'), null, 'acc'); persist(true); renderAll(); } };
   $('locate').onclick = () => { const p = viewing ? null : (run && run.last) || LS.get('rp_lastpos', null); if (p) map.center(p, 18); else if (viewing) backToLive(); else banner('Buscando señal GPS…', '', 3000); };
-  $('bSim').onclick = () => { if (confirm('Se guardará el turno actual y se simularán 3 rondas de prueba. ¿Continuar?')) simulate(); };
   $('bDraw').onclick = () => { draft = []; $('drawRow').style.display = 'flex'; startEdit('boundary', 'Toca el mapa en cada esquina del patio y pulsa "Terminar límite".'); };
   $('bUndo').onclick = () => { draft.pop(); map.draft(draft); };
   $('bDone').onclick = () => { if (draft.length < 3) { banner('Hacen falta al menos 3 puntos.', 'warn', 3000); return; } yard.boundary = draft; draft = []; endEdit(); saveYard(); };
   $('bCancel').onclick = () => { draft = []; endEdit(); map.draft([]); };
   $('bPoint').onclick = () => startEdit('punto', 'Toca en el mapa dónde está el punto de control.');
   $('bExit').onclick = () => startEdit('salida', 'Toca en el mapa la salida al exterior.');
-  $('bDemo').onclick = () => { if (!yard.points.length || confirm('Se sustituirá el patio actual por uno de ejemplo. ¿Continuar?')) demoYard(); };
+  $('bUnlock').onclick = () => { if ($('pin').value === PIN) { $('pin').value = ''; setLocked(false); } else { $('pin').value = ''; banner('Contraseña incorrecta', 'bad', 2500); vibrate(200); } };
+  $('pin').onkeydown = e => { if (e.key === 'Enter') $('bUnlock').click(); };
+  $('bLock').onclick = () => setLocked(true);
   $('bClearYard').onclick = () => { if (confirm('¿Borrar el límite y todos los puntos de control?')) { yard = { boundary: [], points: [] }; saveYard(); } };
   $('bExportYard').onclick = () => download('patio.json', JSON.stringify(yard, null, 1), 'application/json');
   $('bImportYard').onclick = () => $('fileYard').click();
