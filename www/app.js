@@ -6,8 +6,11 @@ const LS = {
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { console.warn('storage', e); } }
 };
 
-const DEF_CFG = { gkey: (window.RONDAS_GOOGLE_KEY || ''), maxAcc: 25, jumpSpd: 90, speedLimit: 25, stopSec: 30, stopRad: 8, stopAlarm: 5, cellSize: 15, covRad: 10, presets: '06-14, 14-22, 22-06', freqMin: 60, cpRad: 15 };
+const DEF_CFG = { gkey: (window.RONDAS_GOOGLE_KEY || ''), maxAcc: 25, jumpSpd: 90, speedLimit: 25, stopSec: 30, stopRad: 8, stopAlarm: 10, cellSize: 15, covRad: 10, presets: '06-14, 14-22, 22-06', freqMin: 60, cpRad: 15 };
 let cfg = Object.assign({}, DEF_CFG, LS.get('rp_cfg', {}));
+if (!LS.get('rp_mig10')) { LS.set('rp_mig10', 1); if (cfg.stopAlarm === 5) { cfg.stopAlarm = 10; LS.set('rp_cfg', Object.assign(LS.get('rp_cfg', {}), { stopAlarm: 10 })); } } // alarma de parado: 5 → 10 min
+// parada larga = incidencia (las paradas en modo relevo no cuentan)
+function isLong(s) { return !!cfg.stopAlarm && s.dur >= cfg.stopAlarm * 60000 && !s.relevo; }
 cfg.gkey = window.RONDAS_GOOGLE_KEY || ''; // la clave solo se define en config.js, no se puede cambiar desde la app
 let yard = LS.get('rp_yard', { boundary: [], points: [] });
 // migra las salidas de la versión anterior a puntos de control
@@ -368,7 +371,7 @@ const SND = {
 };
 // vigila la parada en curso aunque no lleguen posiciones nuevas: aviso 1 min antes y alarma repetida cada 30 s
 setInterval(() => {
-  if (!run || run.end || !run.inStop || !run.anchor || !(cfg.stopAlarm > 0)) return;
+  if (!run || run.end || !run.inStop || !run.anchor || !(cfg.stopAlarm > 0) || run.relevo) return;
   const dt = nowT() - run.anchor.t, lim = cfg.stopAlarm * 60000;
   if (dt >= lim) {
     if (!run.alarmed) { run.alarmed = true; logEv('Parado más de ' + cfg.stopAlarm + ' min', run.anchor, 'bad'); }
@@ -642,14 +645,28 @@ function checkOverdue() {
     if (s.k === 'bad' && !run.overdue[cp.id]) { run.overdue[cp.id] = true; logEv('Sin pasar por ' + cp.name + ' en ' + cfg.freqMin + ' min', cp, 'bad'); vibrate([300, 100, 300]); }
   });
 }
+/* Modo relevo: silencia la alarma de parado; se apaga solo al alejarse 20 m */
+const RELEVO_M = 20;
+function setRelevo(on, why) {
+  if (!run || run.end || !!run.relevo === on) return;
+  if (on) { run.relevo = { t: nowT(), lat: run.last && run.last.lat, lng: run.last && run.last.lng }; if (run.anchor) run.anchor.relevo = true; cancelStopAlarm(); logEv('Modo relevo activado', run.last, 'acc'); banner('Modo relevo: la alarma de parado no suena. Se quita sola al moverte.', '', 5000); }
+  else { const d = nowT() - run.relevo.t; run.relevo = null; logEv('Modo relevo terminado' + (why ? ' (' + why + ')' : '') + ' tras ' + fmtMin(d), run.last, 'acc'); banner('Modo relevo desactivado' + (why ? ': ' + why : ''), '', 4000); }
+  if (RN && RN.relevo) RN.relevo({ on }).catch(() => { });
+  renderRelevo(); persist(true);
+}
+function renderRelevo() { const b = $('bRelevo'); if (!b) return; const on = !!(run && run.relevo); b.classList.toggle('on', on); b.textContent = on ? '🔕 Relevo ON' : 'Modo relevo'; }
 function detectStop(p, t) {
+  if (run.relevo) {
+    if (run.relevo.lat == null) { run.relevo.lat = p.lat; run.relevo.lng = p.lng; }
+    else if (hav(run.relevo, p) > RELEVO_M) { const e0 = evT; if (e0 == null) evT = t; setRelevo(false, 'movimiento detectado'); evT = e0; }
+  }
   const a = run.anchor;
   if (!a) { run.anchor = { lat: p.lat, lng: p.lng, t, n: 1 }; return; }
   const d = hav(a, p);
   if (d <= cfg.stopRad + Math.min(p.acc * 0.3, 6)) {
     a.lat = (a.lat * a.n + p.lat) / (a.n + 1); a.lng = (a.lng * a.n + p.lng) / (a.n + 1); a.n++;
     if (!run.inStop && t - a.t >= cfg.stopSec * 1000) { run.inStop = true; run.speed = 0; scheduleStopAlarm(); }
-    if (run.inStop && cfg.stopAlarm > 0 && !run.alarmed && t - a.t >= cfg.stopAlarm * 60000) {
+    if (run.inStop && cfg.stopAlarm > 0 && !run.alarmed && !run.relevo && t - a.t >= cfg.stopAlarm * 60000) {
       run.alarmed = true; run.lastAlarm = Date.now(); if (!run.stopNotif) SND.alarm(); logEv('Parado más de ' + cfg.stopAlarm + ' min', a, 'bad');
     }
   } else {
@@ -660,8 +677,9 @@ function detectStop(p, t) {
 function closeStop(t) {
   if (run && run.inStop && run.anchor) {
     const s = { lat: run.anchor.lat, lng: run.anchor.lng, from: run.anchor.t, to: t, dur: t - run.anchor.t };
+    if (run.relevo || run.anchor.relevo) s.relevo = true;
     run.stops.push(s); map.stops(markList(run));
-    logEv('Parada de ' + fmtMin(s.dur) + ' (desde ' + fmtHM(s.from) + ')', s, s.dur >= cfg.stopAlarm * 60000 && cfg.stopAlarm > 0 ? 'bad' : 'warn');
+    logEv('Parada de ' + fmtMin(s.dur) + ' (desde ' + fmtHM(s.from) + ')' + (s.relevo ? ' · relevo' : ''), s, isLong(s) ? 'bad' : 'warn');
   }
   if (run) { cancelStopAlarm(); run.inStop = false; run.alarmed = false; run.prewarned = false; run.lastAlarm = 0; }
 }
@@ -711,7 +729,7 @@ async function notify(items) { // items: [{id, title, body, at?}]
 const STOP_IDS = Array.from({ length: 22 }, (_, i) => 9000 + i);
 // al empezar una parada se programan el aviso y la alarma en el sistema: suenan aunque la pantalla esté apagada
 function scheduleStopAlarm() {
-  if (!LN || !run || run.sim || !run.anchor || !(cfg.stopAlarm > 0)) return;
+  if (!LN || !run || run.sim || !run.anchor || !(cfg.stopAlarm > 0) || run.relevo) return;
   const at0 = run.anchor.t + cfg.stopAlarm * 60000, now = Date.now(), list = [];
   if (cfg.stopAlarm >= 2) list.push({ id: STOP_IDS[0], at: at0 - 60000, title: 'Llevas ' + (cfg.stopAlarm - 1) + ' min parado', body: 'Muévete: en 1 minuto salta la alarma' });
   for (let k = 0; k < 20; k++) list.push({ id: STOP_IDS[k + 1], at: at0 + k * 30000, title: '⚠ PARADO MÁS DE ' + (cfg.stopAlarm + Math.floor(k / 2)) + ' MIN', body: 'Queda registrado como incidencia. Muévete para que pare la alarma.' });
@@ -846,7 +864,7 @@ function renderControl() {
   const box = $('roundBox');
   $('cpHead').style.display = pts.length ? '' : 'none';
   if (!pts.length) {
-    const c = covPct(), longS = r.stops.filter(s => cfg.stopAlarm && s.dur >= cfg.stopAlarm * 60000).length, g = (r.gaps || []).length;
+    const c = covPct(), longS = r.stops.filter(s => isLong(s)).length, g = (r.gaps || []).length;
     box.innerHTML = yard.boundary.length < 3
       ? '<div class="hd">Falta el límite de la zona APM</div><div class="sub">El responsable debe dibujarlo en Configurar (con contraseña). Mientras, se registra el recorrido, las paradas y los cortes de señal.</div>'
       : '<div class="hd"><span>Vigilancia de la zona APM</span><span class="num">' + c + '%</span></div><div class="prog"><i style="width:' + c + '%;background:' + (c >= 80 ? 'var(--ok)' : c >= 50 ? 'var(--warn)' : 'var(--bad)') + '"></i></div>' +
@@ -936,7 +954,7 @@ function report(r) {
   const ptRows = pts.map(c => { const n = r.passes.filter(p => p.id === c.id).length, g = maxGap(c, r), last = r.lastPass[c.id];
     return '<tr><td>' + esc(c.name) + (c.type === 'salida' ? ' (salida)' : '') + '</td><td>' + n + '</td><td>' + (last ? fmtTime(last) : '<span class="r">nunca</span>') + '</td><td class="' + (g > due ? 'r' : 'g') + '">' + fmtMin(g) + '</td></tr>'; }).join('');
   const rRows = r.rounds.map(x => '<tr><td>' + x.n + '</td><td>' + fmtTime(x.start) + '</td><td>' + fmtTime(x.end) + '</td><td>' + fmtMin(x.dur) + '</td></tr>').join('');
-  const sRows = r.stops.map((s, k) => '<tr><td>' + (k + 1) + '</td><td>' + fmtTime(s.from) + '</td><td>' + fmtTime(s.to) + '</td><td class="' + (cfg.stopAlarm && s.dur >= cfg.stopAlarm * 60000 ? 'r' : '') + '">' + fmtMin(s.dur) + '</td><td>' + s.lat.toFixed(5) + ', ' + s.lng.toFixed(5) + '</td></tr>').join('');
+  const sRows = r.stops.map((s, k) => '<tr><td>' + (k + 1) + '</td><td>' + fmtTime(s.from) + '</td><td>' + fmtTime(s.to) + '</td><td class="' + (isLong(s) ? 'r' : '') + '">' + fmtMin(s.dur) + '</td><td>' + s.lat.toFixed(5) + ', ' + s.lng.toFixed(5) + '</td></tr>').join('');
   const eRows = r.events.filter(e => e.k === 'bad' || e.k === 'warn').map(e => '<tr><td>' + fmtTime(e.t) + '</td><td>' + esc(e.txt) + '</td></tr>').join('');
   $('report').innerHTML =
     '<h1>Informe de rondas de vigilancia</h1><div>' + esc($('siteName').textContent) + ' · ' + (r.sim ? 'SIMULACIÓN · ' : '') + fmtDate(r.start) + ' – ' + fmtDate(end) + '</div>' +
@@ -990,7 +1008,7 @@ async function reportMap(r, W, H) {
   const label = (q, txt, bg) => { ctx.font = 'bold 22px system-ui,sans-serif'; const w = ctx.measureText(txt).width + 14; ctx.fillStyle = bg; ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.beginPath(); ctx.roundRect ? ctx.roundRect(q.x - w / 2, q.y - 17, w, 34, 8) : ctx.rect(q.x - w / 2, q.y - 17, w, 34); ctx.fill(); ctx.stroke(); ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(txt, q.x, q.y + 1); };
   const dot = (q, rad, fill, txt) => { ctx.beginPath(); ctx.arc(q.x, q.y, rad, 0, Math.PI * 2); ctx.fillStyle = fill; ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = '#fff'; ctx.stroke(); ctx.fillStyle = '#000'; ctx.font = 'bold ' + Math.round(rad * 1.1) + 'px system-ui,sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(txt, q.x, q.y + 1); };
   (r.gaps || []).forEach((g, k) => { if (g.lat != null) label(toPx(g), 'C' + (k + 1) + ' sin señal', '#7c3aed'); });
-  (r.stops || []).forEach((s, k) => dot(toPx(s), 15 + Math.min(10, s.dur / 60000), cfg.stopAlarm && s.dur >= cfg.stopAlarm * 60000 ? '#ef4444' : '#f59e0b', String(k + 1)));
+  (r.stops || []).forEach((s, k) => dot(toPx(s), 15 + Math.min(10, s.dur / 60000), isLong(s) ? '#ef4444' : '#f59e0b', String(k + 1)));
   (r.speeding || []).forEach((o, k) => label(toPx(o), 'V' + (k + 1) + ' ' + o.max + ' km/h · ' + spSecs(o) + ' s', '#dc2626'));
   // leyenda
   const items = [['#ef4444', 'Sin vigilar'], ['#3b82f6', 'Recorrido'], ['#f59e0b', 'Parada (nº)'], ['#dc2626', 'V = exceso velocidad'], ['#7c3aed', 'C = corte de señal']];
@@ -1022,7 +1040,7 @@ const mapsUrl = (lat, lng) => lat != null ? 'https://maps.google.com/?q=' + (+la
 function runPoints(r) { return r.end && r.points ? r.points : yard.points; }
 function runSummary(r) {
   const exp = r.end ? r.expected : expectedRounds(r), comp = r.end ? r.compliance : compliance(r);
-  const longStops = r.stops.filter(s => cfg.stopAlarm && s.dur >= cfg.stopAlarm * 60000);
+  const longStops = r.stops.filter(s => isLong(s));
   return { exp, comp, cov: r.end ? r.coverage : covPct(), longStops, late: runPoints(r).filter(c => maxGap(c, r) > cfg.freqMin * 60000) };
 }
 async function sharePdf(r) {
@@ -1063,7 +1081,7 @@ async function sharePdf(r) {
   tbl('Incidencias', ['Hora', 'Detalle'], r.events.filter(e => e.k === 'bad' || e.k === 'warn').map(e => row([fmtTime(e.t), e.txt], e.k === 'bad' ? RED : AMB)), 1);
   if ((r.speeding || []).length) tbl('Excesos de velocidad', ['Nº', 'Hora', 'Duración', 'Velocidad máx.', 'Posición'], r.speeding.map((o, k) => row(['V' + (k + 1), fmtTime(o.from), fmtSec(spSecs(o)), o.max + ' km/h', o.lat.toFixed(5) + ', ' + o.lng.toFixed(5)], RED)), 3);
   if ((r.gaps || []).length) tbl('Cortes de señal GPS', ['Nº', 'Desde', 'Hasta', 'Duración', 'Última posición'], r.gaps.map((g, k) => row(['C' + (k + 1), fmtTime(g.from), fmtTime(g.to), fmtMin(g.dur), g.lat != null ? g.lat.toFixed(5) + ', ' + g.lng.toFixed(5) : '—'], RED)), 3);
-  tbl('Paradas', ['Nº', 'Desde', 'Hasta', 'Duración', 'Posición'], r.stops.map((s, k) => row([String(k + 1), fmtTime(s.from), fmtTime(s.to), fmtMin(s.dur), s.lat.toFixed(5) + ', ' + s.lng.toFixed(5)], cfg.stopAlarm && s.dur >= cfg.stopAlarm * 60000 ? RED : null)), 3);
+  tbl('Paradas', ['Nº', 'Desde', 'Hasta', 'Duración', 'Posición'], r.stops.map((s, k) => row([String(k + 1), fmtTime(s.from), fmtTime(s.to), fmtMin(s.dur), s.lat.toFixed(5) + ', ' + s.lng.toFixed(5)], isLong(s) ? RED : null)), 3);
   if (runPoints(r).length) tbl('Rondas completas', ['Nº', 'Inicio', 'Fin', 'Duración'], r.rounds.map(x => [String(x.n), fmtTime(x.start), fmtTime(x.end), fmtMin(x.dur)]));
   if (y > 262) { doc.addPage(); y = 20; }
   doc.setDrawColor(0); doc.line(14, y + 16, 90, y + 16); doc.line(120, y + 16, 196, y + 16); doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.text('Firma del vigilante', 14, y + 21); doc.text('Firma del supervisor', 120, y + 21);
@@ -1089,7 +1107,7 @@ async function shareXlsx(r) {
   ], [28, 40]), 'Resumen');
   XLSX.utils.book_append_sheet(wb, sheet([['Punto', 'Tipo', 'Pasos', 'Último paso', 'Mayor tiempo sin pasar (min)', 'Estado'], ...runPoints(r).map(c => { const g = maxGap(c, r); return [c.name, c.type === 'salida' ? 'Salida' : 'Punto', r.passes.filter(p => p.id === c.id).length, r.lastPass[c.id] ? fmtTime(r.lastPass[c.id]) : 'nunca', mins(g), g > due ? 'RETRASO' : 'OK']; })], [22, 8, 7, 12, 26, 10]), 'Puntos');
   XLSX.utils.book_append_sheet(wb, sheet([['Hora', 'Gravedad', 'Detalle', 'Mapa'], ...r.events.filter(e => e.k === 'bad' || e.k === 'warn').map(e => [fmtTime(e.t), e.k === 'bad' ? 'Alta' : 'Media', e.txt, mapsUrl(e.lat, e.lng)])], [10, 9, 60, 45]), 'Incidencias');
-  XLSX.utils.book_append_sheet(wb, sheet([['Nº', 'Desde', 'Hasta', 'Duración (min)', 'Larga', 'Mapa'], ...r.stops.map((s, k) => [k + 1, fmtTime(s.from), fmtTime(s.to), mins(s.dur), cfg.stopAlarm && s.dur >= cfg.stopAlarm * 60000 ? 'SÍ' : '', mapsUrl(s.lat, s.lng)])], [5, 10, 10, 14, 7, 45]), 'Paradas');
+  XLSX.utils.book_append_sheet(wb, sheet([['Nº', 'Desde', 'Hasta', 'Duración (min)', 'Larga', 'Mapa'], ...r.stops.map((s, k) => [k + 1, fmtTime(s.from), fmtTime(s.to), mins(s.dur), isLong(s) ? 'SÍ' : '', mapsUrl(s.lat, s.lng)])], [5, 10, 10, 14, 7, 45]), 'Paradas');
   XLSX.utils.book_append_sheet(wb, sheet([['Hora', 'Duración (s)', 'Velocidad máx. (km/h)', 'Mapa'], ...(r.speeding || []).map(o => [fmtTime(o.from), spSecs(o), o.max, mapsUrl(o.lat, o.lng)])], [10, 13, 20, 45]), 'Velocidad');
   XLSX.utils.book_append_sheet(wb, sheet([['Hora', 'Punto', 'Mapa'], ...r.passes.map(p => [fmtTime(p.t), p.name, mapsUrl(p.lat, p.lng)])], [10, 22, 45]), 'Pasos');
   XLSX.utils.book_append_sheet(wb, sheet([['Nº', 'Inicio', 'Fin', 'Duración (min)'], ...r.rounds.map(x => [x.n, fmtTime(x.start), fmtTime(x.end), mins(x.dur)])], [5, 10, 10, 14]), 'Rondas');
@@ -1102,7 +1120,7 @@ async function shareAllXlsx() {
   await loadScript('vendor/xlsx.mini.min.js');
   const mins = ms => Math.round(ms / 6000) / 10, wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, sheet([['Turno', 'Inicio', 'Fin', 'Vigilante', 'Rondas', 'Exigidas', 'Cumplimiento %', 'Paradas', 'Paradas largas', 'Tiempo parado (min)', 'Cortes de señal', 'Sin señal (min)', 'Excesos velocidad', 'Patio %', 'Recorrido (m)', 'Revisar'],
-    ...h.map(r => { const longS = r.stops.filter(s => cfg.stopAlarm && s.dur >= cfg.stopAlarm * 60000).length, gaps = (r.gaps || []).length; return [r.shiftLabel || '', fmtDate(r.start), fmtDate(r.end), r.guard || '', r.rounds.length, r.expected ?? '', r.compliance ?? '', r.stops.length, longS, mins(stoppedMs(r)), gaps, mins(gapMs(r)), (r.speeding || []).length, r.coverage ?? '', Math.round(r.dist), (r.compliance != null && r.compliance < 100) || longS || gaps || (r.speeding || []).length ? 'SÍ' : '']; })],
+    ...h.map(r => { const longS = r.stops.filter(s => isLong(s)).length, gaps = (r.gaps || []).length; return [r.shiftLabel || '', fmtDate(r.start), fmtDate(r.end), r.guard || '', r.rounds.length, r.expected ?? '', r.compliance ?? '', r.stops.length, longS, mins(stoppedMs(r)), gaps, mins(gapMs(r)), (r.speeding || []).length, r.coverage ?? '', Math.round(r.dist), (r.compliance != null && r.compliance < 100) || longS || gaps || (r.speeding || []).length ? 'SÍ' : '']; })],
     [12, 17, 17, 16, 8, 9, 14, 8, 13, 18, 14, 14, 16, 8, 13, 8]), 'Turnos');
   const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
   await shareFile('resumen-turnos-' + stamp(Date.now()) + '.xlsx', new Blob([out], { type: XLSX_TYPE }), 'Resumen de turnos');
@@ -1172,6 +1190,7 @@ function bind() {
   const cur = () => viewing ? viewing.live : run;
   if (AIS_KEY) { $('ships').hidden = false; $('ships').classList.toggle('on', shipsOn); }
   $('ships').onclick = () => { shipsOn = !shipsOn; LS.set('rp_ships', shipsOn); $('ships').classList.toggle('on', shipsOn); if (shipsOn) { startShips(); banner('Barcos en tiempo real activados (pueden tardar unos minutos en aparecer)', '', 4000); } else stopShips(); };
+  $('bRelevo').onclick = () => setRelevo(!(run && run.relevo));
   $('bBeep').onclick = () => { if (RN) { RN.test(); banner('Apaga la pantalla: en 10 s suena la alarma de prueba', '', 8000); return; } SND.alarm(); notify([{ id: 9199, at: Date.now() + 10000, title: 'Prueba de alarma', body: 'Así suena la alarma con la pantalla apagada' }]); if (LN) banner('Apaga la pantalla: en 10 s suena la alarma de prueba', '', 8000); };
   $('bReportNow').onclick = () => sharePdf(cur()).catch(err => banner('No se pudo crear el PDF: ' + err.message, 'bad', 5000));
   $('bXlsNow').onclick = () => shareXlsx(cur()).catch(err => banner('No se pudo crear el Excel: ' + err.message, 'bad', 5000));
@@ -1207,7 +1226,7 @@ function fillCfg() { Object.keys(DEF_CFG).forEach(k => { if ($(k)) $(k).value = 
     if (saved && !saved.end) { run = Object.assign(newRun(), saved); redrawYard(); finishRun(); }
     run = null; startRun();
   }
-  renderEvents(); renderHist(); renderAll(); startShips();
+  renderEvents(); renderHist(); renderAll(); startShips(); renderRelevo(); if (RN && RN.relevo && run && run.relevo) RN.relevo({ on: true }).catch(() => { });
   setInterval(() => {
     if (run && !run.end && !viewing && !simTimer && nowT() >= run.periodEnd) { finishRun(); startRun(); renderEvents(); }
     checkOverdue(); renderAll();

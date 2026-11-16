@@ -51,7 +51,7 @@ public class RondasPlugin extends Plugin {
             Intent i = new Intent(getContext(), GuardService.class);
             i.putExtra("cfg", true);
             i.putExtra("speedLimit", num(call, "speedLimit", 25.0));
-            i.putExtra("stopAlarm", num(call, "stopAlarm", 5.0));
+            i.putExtra("stopAlarm", num(call, "stopAlarm", 10.0));
             i.putExtra("stopRad", num(call, "stopRad", 8.0));
             i.putExtra("stopSec", num(call, "stopSec", 30.0));
             i.putExtra("maxAcc", num(call, "maxAcc", 25.0));
@@ -69,6 +69,16 @@ public class RondasPlugin extends Plugin {
         new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() ->
             GuardService.alarm(ctx, 9199, "Prueba de alarma", "Así suena la alarma con la pantalla apagada"), 10000);
         call.resolve();
+    }
+
+    @PluginMethod
+    public void relevo(PluginCall call) {
+        try {
+            Intent i = new Intent(getContext(), GuardService.class);
+            i.putExtra("relevo", Boolean.TRUE.equals(call.getBoolean("on", false)));
+            ContextCompat.startForegroundService(getContext(), i);
+            call.resolve();
+        } catch (Exception e) { call.reject(e.getMessage()); }
     }
 
     @PluginMethod

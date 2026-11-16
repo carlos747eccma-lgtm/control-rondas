@@ -34,12 +34,14 @@ public class GuardService extends Service implements LocationListener {
     private final Handler h = new Handler(Looper.getMainLooper());
 
     private double speedLimit = 25, stopRad = 8, maxAcc = 25, jumpSpd = 90;
-    private long stopSecMs = 30000, stopAlarmMs = 5 * 60000;
+    private long stopSecMs = 30000, stopAlarmMs = 10 * 60000;
 
     private boolean hasA, inStop, warned;
     private double aLat, aLng; private long aT; private int aN; private long lastAlarm;
     private int osN, osLow; private boolean inOs; private int osCount;
     private Location prev;
+    // modo relevo: sin alarma de parado hasta que se aleje 20 m
+    private boolean relevo; private double rLat = Double.NaN, rLng;
 
     // Posiciones guardadas en nativo: la web las recoge al volver (con la pantalla bloqueada está congelada)
     static final java.util.ArrayList<double[]> BUF = new java.util.ArrayList<>();
@@ -102,6 +104,10 @@ public class GuardService extends Service implements LocationListener {
 
     @Override
     public int onStartCommand(Intent i, int flags, int startId) {
+        if (i != null && i.hasExtra("relevo")) {
+            relevo = i.getBooleanExtra("relevo", false);
+            if (relevo) { cancelStop(); if (prev != null) { rLat = prev.getLatitude(); rLng = prev.getLongitude(); } else rLat = Double.NaN; }
+        }
         if (i != null && i.getBooleanExtra("cfg", false)) {
             speedLimit = i.getDoubleExtra("speedLimit", speedLimit);
             stopAlarmMs = (long) (i.getDoubleExtra("stopAlarm", stopAlarmMs / 60000.0) * 60000);
@@ -140,6 +146,10 @@ public class GuardService extends Service implements LocationListener {
             if (dt > 0 && l.distanceTo(prev) / dt * 3.6 > jumpSpd) return; // salto de GPS
         }
         prev = l;
+        if (relevo) {
+            if (Double.isNaN(rLat)) { rLat = l.getLatitude(); rLng = l.getLongitude(); }
+            else { float[] dr = new float[1]; Location.distanceBetween(rLat, rLng, l.getLatitude(), l.getLongitude(), dr); if (dr[0] > 20) relevo = false; }
+        }
         checkSpeed(spd, acc);
         checkStop(l, acc, now);
     }
@@ -188,7 +198,7 @@ public class GuardService extends Service implements LocationListener {
         @Override
         public void run() {
             try {
-                if (inStop && stopAlarmMs > 0) {
+                if (inStop && stopAlarmMs > 0 && !relevo) {
                     long now = System.currentTimeMillis(), dt = now - aT;
                     if (dt >= stopAlarmMs) {
                         if (now - lastAlarm >= 30000) {
