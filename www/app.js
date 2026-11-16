@@ -264,6 +264,30 @@ function fmtHM(t) { return new Date(t).toLocaleTimeString('es-ES', { hour: '2-di
 function fmtDate(t) { return new Date(t).toLocaleString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }); }
 let bannerT;
 function banner(msg, kind, ms) { const b = $('banner'); b.textContent = msg; b.className = kind || ''; b.style.display = msg ? 'block' : 'none'; clearTimeout(bannerT); if (ms) bannerT = setTimeout(() => { b.style.display = 'none'; }, ms); }
+/* ---------- Pitidos de alarma (Web Audio, volumen multimedia) ---------- */
+let actx = null;
+function audio() { try { actx = actx || new (window.AudioContext || window.webkitAudioContext)(); if (actx.state === 'suspended') actx.resume(); } catch (e) { } return actx; }
+['touchstart', 'click'].forEach(ev => document.addEventListener(ev, () => audio(), { passive: true }));
+function beep(seq) { // seq: [[frecuencia Hz, duración ms], ...] ; frecuencia 0 = silencio
+  const c = audio(); if (!c) return; let t = c.currentTime + 0.02;
+  seq.forEach(([f, d]) => { if (f) { const o = c.createOscillator(), g = c.createGain(); o.type = 'square'; o.frequency.value = f; g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.9, t + 0.01); g.gain.setValueAtTime(0.9, t + d / 1000 - 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + d / 1000); o.connect(g).connect(c.destination); o.start(t); o.stop(t + d / 1000 + 0.02); } t += d / 1000; });
+}
+const SND = {
+  warn: () => { beep([[2000, 180], [0, 120], [2000, 180], [0, 120], [2000, 180]]); vibrate([200, 100, 200, 100, 200]); },
+  alarm: () => { const s = []; for (let i = 0; i < 6; i++) s.push([2900, 220], [1900, 220]); beep(s); vibrate([800, 200, 800, 200, 800]); },
+  speed: () => { beep([[2400, 120], [0, 80], [2400, 120], [0, 80], [2400, 120], [0, 80], [2400, 120]]); vibrate([150, 80, 150, 80, 150]); },
+};
+// vigila la parada en curso aunque no lleguen posiciones nuevas: aviso 1 min antes y alarma repetida cada 30 s
+setInterval(() => {
+  if (!run || run.end || !run.inStop || !run.anchor || !(cfg.stopAlarm > 0)) return;
+  const dt = nowT() - run.anchor.t, lim = cfg.stopAlarm * 60000;
+  if (dt >= lim) {
+    if (!run.alarmed) { run.alarmed = true; logEv('Parado más de ' + cfg.stopAlarm + ' min', run.anchor, 'bad'); }
+    if (!run.lastAlarm || Date.now() - run.lastAlarm >= 30000) { run.lastAlarm = Date.now(); SND.alarm(); banner('PARADO MÁS DE ' + cfg.stopAlarm + ' MIN: muévete, queda registrado como incidencia', 'bad', 8000); }
+  } else if (cfg.stopAlarm >= 2 && dt >= lim - 60000 && !run.prewarned) {
+    run.prewarned = true; SND.warn(); banner('Llevas ' + fmtMin(dt) + ' parado: en 1 min salta la alarma', 'warn', 6000);
+  }
+}, 3000);
 function vibrate(p) { try { navigator.vibrate && navigator.vibrate(p); } catch (e) { } }
 function setKpi(id, val, sub, cls, label) { const el = $(id); if (label) el.querySelector('span').textContent = label; el.querySelector('b').textContent = val; el.querySelector('em').textContent = sub || ' '; el.className = 'kpi' + (el.classList.contains('xl') ? ' xl' : '') + (cls ? ' ' + cls : ''); }
 
@@ -468,7 +492,7 @@ function checkSpeed(spd, p, t, acc) {
   if (!lim) return;
   if (spd > lim && acc <= 20) {
     run.osN = (run.osN || 0) + 1; run.osLow = 0;
-    if (!run.os && run.osN >= 3) { run.os = { from: t, to: t, max: spd, lat: p.lat, lng: p.lng }; vibrate([150, 80, 150]); }
+    if (!run.os && run.osN >= 3) { run.os = { from: t, to: t, max: spd, lat: p.lat, lng: p.lng }; SND.speed(); banner('Más de ' + lim + ' km/h: queda registrado', 'bad', 5000); }
     else if (run.os) { run.os.to = t; if (spd > run.os.max) { run.os.max = spd; run.os.lat = p.lat; run.os.lng = p.lng; } }
   } else {
     run.osN = 0;
@@ -531,7 +555,7 @@ function detectStop(p, t) {
     a.lat = (a.lat * a.n + p.lat) / (a.n + 1); a.lng = (a.lng * a.n + p.lng) / (a.n + 1); a.n++;
     if (!run.inStop && t - a.t >= cfg.stopSec * 1000) { run.inStop = true; run.speed = 0; }
     if (run.inStop && cfg.stopAlarm > 0 && !run.alarmed && t - a.t >= cfg.stopAlarm * 60000) {
-      run.alarmed = true; vibrate([400, 150, 400]); logEv('Parado más de ' + cfg.stopAlarm + ' min', a, 'bad');
+      run.alarmed = true; run.lastAlarm = Date.now(); SND.alarm(); logEv('Parado más de ' + cfg.stopAlarm + ' min', a, 'bad');
     }
   } else {
     closeStop(t);
@@ -544,7 +568,7 @@ function closeStop(t) {
     run.stops.push(s); map.stops(markList(run));
     logEv('Parada de ' + fmtMin(s.dur) + ' (desde ' + fmtHM(s.from) + ')', s, s.dur >= cfg.stopAlarm * 60000 && cfg.stopAlarm > 0 ? 'bad' : 'warn');
   }
-  if (run) { run.inStop = false; run.alarmed = false; }
+  if (run) { run.inStop = false; run.alarmed = false; run.prewarned = false; run.lastAlarm = 0; }
 }
 
 /* ---------- GPS ---------- */
@@ -986,6 +1010,7 @@ function bind() {
   };
   $('evList').onclick = e => { const li = e.target.closest('[data-go]'); if (li) { const [lat, lng] = li.dataset.go.split(',').map(Number); map.center({ lat, lng }, 19); } };
   const cur = () => viewing ? viewing.live : run;
+  $('bBeep').onclick = () => SND.alarm();
   $('bReportNow').onclick = () => sharePdf(cur()).catch(err => banner('No se pudo crear el PDF: ' + err.message, 'bad', 5000));
   $('bXlsNow').onclick = () => shareXlsx(cur()).catch(err => banner('No se pudo crear el Excel: ' + err.message, 'bad', 5000));
   $('bXlsAll').onclick = () => shareAllXlsx().catch(err => banner('No se pudo crear el Excel: ' + err.message, 'bad', 5000));
