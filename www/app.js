@@ -8,7 +8,7 @@ const LS = {
 
 const DEF_CFG = { gkey: (window.RONDAS_GOOGLE_KEY || ''), maxAcc: 25, maxSpd: 25, stopSec: 30, stopRad: 8, stopAlarm: 5, cellSize: 15, covRad: 10, shifts: '6,14,22', freqMin: 60, cpRad: 15 };
 let cfg = Object.assign({}, DEF_CFG, LS.get('rp_cfg', {}));
-if (!cfg.gkey && window.RONDAS_GOOGLE_KEY) cfg.gkey = window.RONDAS_GOOGLE_KEY;
+cfg.gkey = window.RONDAS_GOOGLE_KEY || ''; // la clave solo se define en config.js, no se puede cambiar desde la app
 let yard = LS.get('rp_yard', { boundary: [], points: [] });
 // migra las salidas de la versión anterior a puntos de control
 if (!yard.points) { yard.points = (yard.exits || []).map((e, k) => ({ id: 'x' + k, name: e.name, type: 'salida', lat: e.lat, lng: e.lng })); delete yard.exits; }
@@ -708,13 +708,11 @@ function bind() {
   };
   $('cpList').onclick = e => { const el = e.target.closest('[data-id]'); if (el) focusPoint(el.dataset.id); };
   $('bSave').onclick = () => {
-    const oldKey = cfg.gkey;
-    cfg.gkey = $('gkey').value.trim();
     ['maxAcc', 'maxSpd', 'stopSec', 'stopRad', 'stopAlarm', 'covRad', 'freqMin', 'cpRad'].forEach(k => { const v = +$(k).value; cfg[k] = isFinite(v) && $(k).value !== '' && v >= 0 ? v : DEF_CFG[k]; });
     cfg.shifts = $('shifts').value.trim();
     if (run && !run.end && isFinite(run.periodEnd)) run.periodEnd = nextShift(run.start);
-    LS.set('rp_cfg', cfg); fillCfg(); redrawYard();
-    if (cfg.gkey !== oldKey) { persist(true); location.reload(); } else banner('Configuración guardada', '', 2000);
+    const { gkey, ...save } = cfg; LS.set('rp_cfg', save); fillCfg(); redrawYard();
+    banner('Configuración guardada', '', 2000);
   };
   $('evList').onclick = e => { const li = e.target.closest('[data-go]'); if (li) { const [lat, lng] = li.dataset.go.split(',').map(Number); map.center({ lat, lng }, 19); } };
   $('bReportNow').onclick = () => report(viewing ? viewing.live : run);
