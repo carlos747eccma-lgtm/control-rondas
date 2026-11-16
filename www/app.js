@@ -1,0 +1,748 @@
+/* Rondas Patio — seguimiento GPS de rondas de seguridad en patio de contenedores. */
+'use strict';
+const $ = id => document.getElementById(id);
+const LS = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { console.warn('storage', e); } }
+};
+
+const DEF_CFG = { gkey: (window.RONDAS_GOOGLE_KEY || ''), maxAcc: 25, maxSpd: 25, stopSec: 30, stopRad: 8, stopAlarm: 5, cellSize: 15, covRad: 10, shifts: '6,14,22', freqMin: 60, cpRad: 15 };
+let cfg = Object.assign({}, DEF_CFG, LS.get('rp_cfg', {}));
+if (!cfg.gkey && window.RONDAS_GOOGLE_KEY) cfg.gkey = window.RONDAS_GOOGLE_KEY;
+let yard = LS.get('rp_yard', { boundary: [], points: [] });
+// migra las salidas de la versión anterior a puntos de control
+if (!yard.points) { yard.points = (yard.exits || []).map((e, k) => ({ id: 'x' + k, name: e.name, type: 'salida', lat: e.lat, lng: e.lng })); delete yard.exits; }
+let run = null;            // ronda en curso
+let cells = [];            // zonas de la cuadrícula
+let cellIdx = new Map();   // "i,j" -> celda
+let proj = null;           // proyección local en metros
+let watchId = null, wakeLock = null, simTimer = null;
+let editMode = null;       // 'boundary' | 'punto' | 'salida' | null
+let draft = [];
+let lastFixAt = 0, lastRawAcc = null;
+let simClock = null; // reloj acelerado durante la simulación
+const nowT = () => simClock != null ? simClock : Date.now();
+// Centro por defecto: Puerto de Valencia (zona de APM Terminals). El límite exacto se dibuja en la pestaña Patio.
+const VLC = { lat: 39.4325, lng: -0.3185 };
+
+/* ---------- Geometría ---------- */
+function makeProj(lat0, lng0) {
+  const kx = 111320 * Math.cos(lat0 * Math.PI / 180), ky = 110540;
+  return {
+    lat0, lng0,
+    xy: p => ({ x: (p.lng - lng0) * kx, y: (p.lat - lat0) * ky }),
+    ll: (x, y) => ({ lat: lat0 + y / ky, lng: lng0 + x / kx })
+  };
+}
+function hav(a, b) {
+  const R = 6371000, r = Math.PI / 180;
+  const dLat = (b.lat - a.lat) * r, dLng = (b.lng - a.lng) * r;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+function inPoly(pt, poly) { // pt {x,y}, poly [{x,y}]
+  let c = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[i], b = poly[j];
+    if ((a.y > pt.y) !== (b.y > pt.y) && pt.x < (b.x - a.x) * (pt.y - a.y) / (b.y - a.y) + a.x) c = !c;
+  }
+  return c;
+}
+function polyArea(poly) { let s = 0; for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) s += (poly[j].x + poly[i].x) * (poly[j].y - poly[i].y); return Math.abs(s / 2); }
+
+/* ---------- Cuadrícula de zonas ---------- */
+function buildGrid() {
+  cells = []; cellIdx = new Map();
+  if (yard.boundary.length < 3) { proj = null; return; }
+  const b = yard.boundary;
+  proj = makeProj(b.reduce((s, p) => s + p.lat, 0) / b.length, b.reduce((s, p) => s + p.lng, 0) / b.length);
+  const poly = b.map(proj.xy);
+  const xs = poly.map(p => p.x), ys = poly.map(p => p.y);
+  const s = cfg.cellSize, minX = Math.min(...xs), minY = Math.min(...ys);
+  const nx = Math.ceil((Math.max(...xs) - minX) / s), ny = Math.ceil((Math.max(...ys) - minY) / s);
+  for (let i = 0; i < nx; i++) for (let j = 0; j < ny; j++) {
+    const x0 = minX + i * s, y0 = minY + j * s, cx = x0 + s / 2, cy = y0 + s / 2;
+    // la zona entra si su centro o alguna esquina cae dentro del límite
+    const pts = [{ x: cx, y: cy }, { x: x0 + 1, y: y0 + 1 }, { x: x0 + s - 1, y: y0 + 1 }, { x: x0 + 1, y: y0 + s - 1 }, { x: x0 + s - 1, y: y0 + s - 1 }];
+    if (!inPoly(pts[0], poly) && pts.filter(p => inPoly(p, poly)).length < 2) continue;
+    const c = { i, j, x0, y0, cx, cy, covered: false, at: null,
+      corners: [proj.ll(x0, y0), proj.ll(x0 + s, y0), proj.ll(x0 + s, y0 + s), proj.ll(x0, y0 + s)] };
+    cells.push(c); cellIdx.set(i + ',' + j, c);
+  }
+  proj.minX = minX; proj.minY = minY; proj.poly = poly;
+}
+function coverAt(p, t) {
+  if (!proj) return 0;
+  const { x, y } = proj.xy(p), r = cfg.covRad, s = cfg.cellSize;
+  let n = 0;
+  const i0 = Math.floor((x - r - proj.minX) / s), i1 = Math.floor((x + r - proj.minX) / s);
+  const j0 = Math.floor((y - r - proj.minY) / s), j1 = Math.floor((y + r - proj.minY) / s);
+  for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
+    const c = cellIdx.get(i + ',' + j); if (!c || c.covered) continue;
+    const dx = Math.max(c.x0 - x, 0, x - (c.x0 + s)), dy = Math.max(c.y0 - y, 0, y - (c.y0 + s));
+    if (dx * dx + dy * dy <= r * r) { c.covered = true; c.at = t; map.cell(c); n++; }
+  }
+  return n;
+}
+function covPct() { return cells.length ? Math.round(100 * cells.filter(c => c.covered).length / cells.length) : null; }
+function insideYard(p) { return proj ? inPoly(proj.xy(p), proj.poly) : true; }
+
+/* ---------- Filtro Kalman simple (lat/lng con varianza en metros) ---------- */
+function Kalman(qMs) {
+  let lat, lng, v = -1, t0;
+  return {
+    step(p, acc, t) {
+      acc = Math.max(acc, 1);
+      if (v < 0) { lat = p.lat; lng = p.lng; v = acc * acc; t0 = t; return { lat, lng }; }
+      const dt = Math.max(0, (t - t0) / 1000); t0 = t;
+      v += dt * qMs * qMs;
+      const k = v / (v + acc * acc);
+      lat += k * (p.lat - lat); lng += k * (p.lng - lng); v = (1 - k) * v;
+      return { lat, lng };
+    },
+    reset() { v = -1; }
+  };
+}
+
+/* ---------- Mapas: Leaflet (sin clave) y Google Maps (con clave) ---------- */
+const COL = { red: '#ef4444', grn: '#22c55e', amb: '#f59e0b', blu: '#3b82f6', wht: '#ffffff' };
+const STC = { ok: '#16a34a', warn: '#d97706', bad: '#dc2626', idle: '#475569' };
+function cpHtml(e) {
+  const r = e.type === 'salida' ? '4px' : '50%';
+  return '<div style="transform:translate(-12px,-12px);display:flex;align-items:center;gap:4px;white-space:nowrap"><span style="display:grid;place-items:center;width:24px;height:24px;border-radius:' + r + ';background:' + STC[e.k] + ';border:2px solid #fff;color:#fff;font:700 11px system-ui;box-shadow:0 1px 4px rgba(0,0,0,.5)">' + esc(e.short) + '</span><span style="background:rgba(11,18,32,.85);color:#fff;font:600 11px system-ui;padding:1px 5px;border-radius:4px">' + esc(e.name) + '</span></div>';
+}
+
+/* Pinta en rojo el patio y "borra" el rojo a lo largo del recorrido (ancho = distancia de visión) */
+function drawCoverage(ctx, toPx, w, h) {
+  ctx.clearRect(0, 0, w, h);
+  if (yard.boundary.length < 3) return;
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = 'rgba(239,68,68,0.42)'; ctx.strokeStyle = 'rgba(239,68,68,0.9)'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); yard.boundary.forEach((p, i) => { const q = toPx(p); i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y); }); ctx.closePath(); ctx.fill();
+  const tr = run && run.track;
+  if (!tr || !tr.length) return;
+  const a = toPx(tr[0]), b = toPx({ lat: tr[0].lat + cfg.covRad / 110540, lng: tr[0].lng }), r = Math.max(1, Math.abs(a.y - b.y));
+  ctx.globalCompositeOperation = 'destination-out';
+  ctx.lineWidth = 2 * r; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = '#000';
+  ctx.beginPath(); let prev = null;
+  for (const p of tr) {
+    const q = toPx(p);
+    if (prev && p.t - prev.t < 90000 && hav(prev, p) < 60) ctx.lineTo(q.x, q.y); else { ctx.moveTo(q.x, q.y); ctx.lineTo(q.x + 0.1, q.y); }
+    prev = p;
+  }
+  ctx.stroke();
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+function LeafletAdapter() {
+  let m, gStops, gExits, gDraft, boundary, track, me, meAcc, canvas, covT = 0;
+  function paint() {
+    covT = 0; if (!m || !canvas) return;
+    const s = m.getSize(); canvas.width = s.x; canvas.height = s.y;
+    L.DomUtil.setPosition(canvas, m.containerPointToLayerPoint([0, 0]));
+    drawCoverage(canvas.getContext('2d'), p => m.latLngToContainerPoint([p.lat, p.lng]), s.x, s.y);
+  }
+  function cov() { if (!covT) covT = setTimeout(paint, 300); }
+  return {
+    name: 'leaflet',
+    async init(el, center, zoom, onClick) {
+      m = L.map(el, { preferCanvas: true, zoomControl: true }).setView([center.lat, center.lng], zoom);
+      const sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 21, maxNativeZoom: 19, attribution: 'Imágenes © Esri' });
+      const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 21, maxNativeZoom: 19, attribution: '© OpenStreetMap' });
+      sat.addTo(m); L.control.layers({ 'Satélite': sat, 'Calles': osm }, null, { position: 'topright' }).addTo(m);
+      canvas = L.DomUtil.create('canvas', 'leaflet-zoom-hide'); canvas.style.pointerEvents = 'none';
+      m.createPane('cov').style.zIndex = 390; m.getPane('cov').appendChild(canvas);
+      m.on('moveend zoomend resize viewreset', paint);
+      gStops = L.layerGroup().addTo(m); gExits = L.layerGroup().addTo(m); gDraft = L.layerGroup().addTo(m);
+      track = L.polyline([], { color: COL.blu, weight: 4, opacity: .9 }).addTo(m);
+      m.on('click', e => onClick({ lat: e.latlng.lat, lng: e.latlng.lng }));
+    },
+    center(p, z) { m.setView([p.lat, p.lng], z || m.getZoom()); },
+    fit(pts) { if (pts.length) m.fitBounds(L.latLngBounds(pts.map(p => [p.lat, p.lng])), { padding: [20, 20] }); },
+    boundary(pts) { if (boundary) boundary.remove(); boundary = pts.length >= 3 ? L.polygon(pts.map(p => [p.lat, p.lng]), { color: COL.wht, weight: 2, fill: false, dashArray: '6 4', interactive: false }).addTo(m) : null; },
+    cells() { cov(); }, cell() { cov(); },
+    track(pts) { track.setLatLngs(pts.map(p => [p.lat, p.lng])); cov(); },
+    trackAdd(p) { track.addLatLng([p.lat, p.lng]); cov(); },
+    me(p, acc) {
+      if (!p) { if (me) { me.remove(); meAcc.remove(); me = meAcc = null; } return; }
+      if (!me) { meAcc = L.circle([p.lat, p.lng], { radius: acc, color: COL.blu, weight: 1, fillOpacity: .12, interactive: false }).addTo(m); me = L.circleMarker([p.lat, p.lng], { radius: 8, color: '#fff', weight: 2, fillColor: COL.blu, fillOpacity: 1, interactive: false }).addTo(m); }
+      else { me.setLatLng([p.lat, p.lng]); meAcc.setLatLng([p.lat, p.lng]).setRadius(acc); }
+    },
+    stops(list) { gStops.clearLayers(); list.forEach(s => L.circleMarker([s.lat, s.lng], { radius: 6 + Math.min(10, s.dur / 60000), color: '#000', weight: 1, fillColor: COL.amb, fillOpacity: .95 }).bindTooltip(fmtDur(s.dur) + ' parado').addTo(gStops)); },
+    points(list) { gExits.clearLayers(); list.forEach(e => L.marker([e.lat, e.lng], { icon: L.divIcon({ className: '', iconSize: null, html: cpHtml(e) }) }).on('click', () => focusPoint(e.id)).addTo(gExits)); },
+    draft(pts) { gDraft.clearLayers(); if (pts.length) { L.polyline(pts.map(p => [p.lat, p.lng]), { color: COL.amb, weight: 3 }).addTo(gDraft); pts.forEach(p => L.circleMarker([p.lat, p.lng], { radius: 5, color: COL.amb, fillOpacity: 1 }).addTo(gDraft)); } }
+  };
+}
+
+function GoogleAdapter(key) {
+  let m, boundary, track, me, meAcc, stopsArr = [], exitsArr = [], draftArr = [], ov, covT = 0;
+  function cov() { if (!covT) covT = setTimeout(() => { covT = 0; ov && ov.draw(); }, 300); }
+  const LL = p => ({ lat: p.lat, lng: p.lng });
+  return {
+    name: 'google',
+    init(el, center, zoom, onClick) {
+      return new Promise((res, rej) => {
+        window.gm_authFailure = () => rej(new Error('Clave de Google rechazada'));
+        window.__gmReady = () => {
+          m = new google.maps.Map(el, { center, zoom, mapTypeId: 'hybrid', tilt: 0, gestureHandling: 'greedy', streetViewControl: false, mapTypeControl: true, mapTypeControlOptions: { mapTypeIds: ['roadmap', 'hybrid'], position: google.maps.ControlPosition.TOP_RIGHT, style: google.maps.MapTypeControlStyle.DROPDOWN_MENU }, fullscreenControl: false, clickableIcons: false });
+          track = new google.maps.Polyline({ map: m, path: [], strokeColor: COL.blu, strokeWeight: 4, clickable: false, zIndex: 5 });
+          m.addListener('click', e => onClick({ lat: e.latLng.lat(), lng: e.latLng.lng() }));
+          // capa de cobertura: lienzo que cubre la vista con margen
+          ov = new google.maps.OverlayView();
+          ov.onAdd = function () { this.c = document.createElement('canvas'); this.c.style.cssText = 'position:absolute;pointer-events:none'; this.getPanes().overlayLayer.appendChild(this.c); };
+          ov.draw = function () {
+            const pr = this.getProjection(), b = m.getBounds(); if (!pr || !b || !this.c) return;
+            const ne = pr.fromLatLngToDivPixel(b.getNorthEast()), sw = pr.fromLatLngToDivPixel(b.getSouthWest());
+            const w = ne.x - sw.x, h = sw.y - ne.y, x0 = sw.x - w / 2, y0 = ne.y - h / 2, W = Math.round(w * 2), H = Math.round(h * 2);
+            const c = this.c; c.width = W; c.height = H; c.style.left = x0 + 'px'; c.style.top = y0 + 'px';
+            drawCoverage(c.getContext('2d'), p => { const q = pr.fromLatLngToDivPixel(new google.maps.LatLng(p.lat, p.lng)); return { x: q.x - x0, y: q.y - y0 }; }, W, H);
+          };
+          ov.setMap(m);
+          m.addListener('idle', () => ov.draw());
+          res();
+        };
+        const s = document.createElement('script');
+        s.src = 'https://maps.googleapis.com/maps/api/js?key=' + encodeURIComponent(key) + '&callback=__gmReady&loading=async&language=es&region=ES';
+        s.onerror = () => rej(new Error('No se pudo cargar Google Maps'));
+        document.head.appendChild(s);
+        setTimeout(() => rej(new Error('Google Maps tarda demasiado')), 15000);
+      });
+    },
+    center(p, z) { m.setCenter(LL(p)); if (z) m.setZoom(z); },
+    fit(pts) { if (!pts.length) return; const b = new google.maps.LatLngBounds(); pts.forEach(p => b.extend(LL(p))); m.fitBounds(b, 20); },
+    boundary(pts) { if (boundary) boundary.setMap(null); boundary = pts.length >= 3 ? new google.maps.Polygon({ map: m, paths: pts.map(LL), strokeColor: COL.wht, strokeWeight: 2, fillOpacity: 0, clickable: false }) : null; },
+    cells() { cov(); }, cell() { cov(); },
+    track(pts) { track.setPath(pts.map(LL)); cov(); },
+    trackAdd(p) { track.getPath().push(new google.maps.LatLng(p.lat, p.lng)); cov(); },
+    me(p, acc) {
+      if (!p) { if (me) { me.setMap(null); meAcc.setMap(null); me = meAcc = null; } return; }
+      if (!me) {
+        meAcc = new google.maps.Circle({ map: m, center: LL(p), radius: acc, strokeColor: COL.blu, strokeWeight: 1, fillColor: COL.blu, fillOpacity: .12, clickable: false });
+        me = new google.maps.Marker({ map: m, position: LL(p), zIndex: 10, icon: { path: google.maps.SymbolPath.CIRCLE, scale: 8, fillColor: COL.blu, fillOpacity: 1, strokeColor: '#fff', strokeWeight: 2 } });
+      } else { me.setPosition(LL(p)); meAcc.setCenter(LL(p)); meAcc.setRadius(acc); }
+    },
+    stops(list) { stopsArr.forEach(x => x.setMap(null)); stopsArr = list.map(s => new google.maps.Marker({ map: m, position: LL(s), title: fmtDur(s.dur) + ' parado', icon: { path: google.maps.SymbolPath.CIRCLE, scale: 6 + Math.min(10, s.dur / 60000), fillColor: COL.amb, fillOpacity: .95, strokeColor: '#000', strokeWeight: 1 } })); },
+    points(list) {
+      exitsArr.forEach(x => x.setMap(null));
+      exitsArr = list.map(e => { const mk = new google.maps.Marker({ map: m, position: LL(e), zIndex: 8, label: { text: e.short, color: '#fff', fontSize: '11px', fontWeight: '700' }, title: e.name, icon: { path: e.type === 'salida' ? 'M -9,-9 9,-9 9,9 -9,9 z' : google.maps.SymbolPath.CIRCLE, scale: e.type === 'salida' ? 1 : 11, fillColor: STC[e.k], fillOpacity: 1, strokeColor: '#fff', strokeWeight: 2 } }); mk.addListener('click', () => focusPoint(e.id)); return mk; });
+    },
+    draft(pts) { draftArr.forEach(x => x.setMap(null)); draftArr = []; if (pts.length) { draftArr.push(new google.maps.Polyline({ map: m, path: pts.map(LL), strokeColor: COL.amb, strokeWeight: 3, clickable: false })); pts.forEach(p => draftArr.push(new google.maps.Marker({ map: m, position: LL(p), clickable: false, icon: { path: google.maps.SymbolPath.CIRCLE, scale: 5, fillColor: COL.amb, fillOpacity: 1, strokeWeight: 0 } }))); } }
+  };
+}
+
+let map;
+async function initMap() {
+  const center = yard.boundary[0] || LS.get('rp_lastpos', VLC);
+  const zoom = yard.boundary.length ? 17 : 16;
+  const el = $('map');
+  if (cfg.gkey) {
+    try { map = GoogleAdapter(cfg.gkey); await map.init(el, center, zoom, onMapClick); }
+    catch (e) { banner('Google Maps no disponible (' + e.message + '). Usando mapa alternativo.', 'warn', 8000); el.innerHTML = ''; map = null; }
+  }
+  if (!map) { map = LeafletAdapter(); await map.init(el, center, zoom, onMapClick); }
+  redrawYard();
+  if (yard.boundary.length >= 3) map.fit(yard.boundary);
+}
+
+/* ---------- Utilidades UI ---------- */
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+function fmtDur(ms) { const s = Math.max(0, Math.round(ms / 1000)), h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), ss = s % 60; return (h ? h + ':' + String(m).padStart(2, '0') : String(m).padStart(2, '0')) + ':' + String(ss).padStart(2, '0'); }
+function fmtAgo(ms) { const m = Math.floor(ms / 60000); return m < 1 ? 'hace <1 min' : m < 60 ? 'hace ' + m + ' min' : 'hace ' + Math.floor(m / 60) + ' h ' + (m % 60) + ' min'; }
+function fmtMin(ms) { const m = Math.round(ms / 60000); return m < 60 ? m + ' min' : Math.floor(m / 60) + ' h ' + (m % 60) + ' min'; }
+function fmtDist(m) { return m < 1000 ? Math.round(m) + ' m' : (m / 1000).toFixed(2) + ' km'; }
+function fmtTime(t) { return new Date(t).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', second: '2-digit' }); }
+function fmtHM(t) { return new Date(t).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }); }
+function fmtDate(t) { return new Date(t).toLocaleString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }); }
+let bannerT;
+function banner(msg, kind, ms) { const b = $('banner'); b.textContent = msg; b.className = kind || ''; b.style.display = msg ? 'block' : 'none'; clearTimeout(bannerT); if (ms) bannerT = setTimeout(() => { b.style.display = 'none'; }, ms); }
+function vibrate(p) { try { navigator.vibrate && navigator.vibrate(p); } catch (e) { } }
+function setKpi(id, val, sub, cls) { const el = $(id); el.querySelector('b').textContent = val; el.querySelector('em').textContent = sub || ' '; el.className = 'kpi' + (el.classList.contains('xl') ? ' xl' : '') + (cls ? ' ' + cls : ''); }
+
+/* ---------- Patio: límite y puntos de control ---------- */
+function shortName(cp, k) { return cp.type === 'salida' ? 'S' + (yard.points.filter((c, i) => c.type === 'salida' && i <= k).length) : 'P' + (yard.points.filter((c, i) => c.type !== 'salida' && i <= k).length); }
+function redrawYard() {
+  buildGrid();
+  if (run) cells.forEach(c => { if (run.covered && run.covered[c.i + ',' + c.j]) { c.covered = true; c.at = run.covered[c.i + ',' + c.j]; } });
+  map.boundary(yard.boundary); map.cells(cells); map.draft(draft);
+  const info = $('yardInfo');
+  const np = yard.points.filter(p => p.type !== 'salida').length, ns = yard.points.length - np;
+  info.textContent = (yard.boundary.length < 3 ? 'Sin límite del patio: pulsa "Dibujar límite" y toca cada esquina del recinto. ' : 'Patio de ' + Math.round(polyArea(proj.poly)).toLocaleString('es-ES') + ' m². ') +
+    np + ' puntos de control y ' + ns + ' salidas. Una ronda está completa cuando el vigilante pasa por todos.';
+  $('cpEdit').innerHTML = yard.points.map((c, k) => '<div class="cpe"><span class="pill ' + (c.type === 'salida' ? 'acc' : 'idle') + '">' + shortName(c, k) + '</span><span class="grow">' + esc(c.name) + '</span><button class="btn sm" data-ren="' + k + '">Renombrar</button><button class="btn sm" data-del="' + k + '">Quitar</button></div>').join('');
+  lastSig = ''; renderAll();
+}
+function saveYard() { LS.set('rp_yard', yard); redrawYard(); }
+function onMapClick(p) {
+  if (editMode === 'boundary') { draft.push(p); map.draft(draft); }
+  else if (editMode === 'punto' || editMode === 'salida') {
+    const type = editMode, n = yard.points.filter(c => c.type === type).length + 1;
+    const name = prompt(type === 'salida' ? 'Nombre de la salida' : 'Nombre del punto de control', type === 'salida' ? 'Salida ' + n : 'Punto ' + n);
+    endEdit();
+    if (name) { yard.points.push({ id: 'c' + Date.now().toString(36), name, type, lat: p.lat, lng: p.lng }); saveYard(); }
+  }
+}
+function demoYard() {
+  const c = run && run.last ? run.last : LS.get('rp_lastpos', null) || mapCenter();
+  const P = makeProj(c.lat, c.lng);
+  yard.boundary = [P.ll(-120, -80), P.ll(120, -80), P.ll(120, 80), P.ll(-120, 80)];
+  const pt = (x, y, name, type) => ({ id: 'd' + name.replace(/\W/g, ''), name, type: type || 'punto', ...P.ll(x, y) });
+  yard.points = [pt(-90, -72, 'Bloque A'), pt(50, -32, 'Bloque B'), pt(-10, 8, 'Bloque C'), pt(-30, 48, 'Taller'), pt(116, -4, 'Puerta Este', 'salida'), pt(-40, -78, 'Salida Sur', 'salida')];
+  saveYard(); map.fit(yard.boundary);
+}
+function mapCenter() { return yard.boundary[0] || LS.get('rp_lastpos', VLC); }
+function focusPoint(id) { const c = yard.points.find(x => x.id === id); if (c) { map.center(c, 19); switchTab('pControl'); } }
+
+/* ---------- Turno ---------- */
+function newRun() {
+  return { id: Date.now(), guard: $('guard').value.trim() || LS.get('rp_guard', ''), start: Date.now(), end: null, paused: false, pausedMs: 0, pauseAt: null,
+    track: [], dist: 0, maxSpeed: 0, speed: 0, stops: [], events: [], covered: {}, rejected: 0, fixes: 0,
+    noSignalMs: 0, outside: false, anchor: null, inStop: false, alarmed: false, last: null, lastAcceptT: null,
+    passes: [], lastPass: {}, rounds: [], roundStart: null, roundVisited: {}, near: {}, overdue: {} };
+}
+let kf = Kalman(3);
+function nextShift(t) {
+  const hrs = String(cfg.shifts).split(/[,; ]+/).map(Number).filter(h => h >= 0 && h < 24).sort((a, b) => a - b);
+  if (!hrs.length) return Infinity;
+  const d = new Date(t);
+  for (let day = 0; day < 2; day++) for (const h of hrs) {
+    const c = new Date(d.getFullYear(), d.getMonth(), d.getDate() + day, h, 0, 0).getTime();
+    if (c > t) return c;
+  }
+  return Infinity;
+}
+function startRun(sim) {
+  if (run && !run.end) return;
+  run = newRun(); run.start = run.roundStart = nowT(); run.periodEnd = sim === true ? Infinity : nextShift(run.start); run.sim = sim === true; kf = Kalman(3);
+  cells.forEach(c => { c.covered = false; c.at = null; }); map.cells(cells); map.track([]); map.stops([]);
+  logEv('Inicio de turno' + (run.guard ? ' · ' + run.guard : '') + (run.sim ? ' (simulación)' : ''), null, 'acc');
+  if (sim !== true) startGps(); keepAwake(); persist(true); lastSig = ''; renderAll();
+}
+function finishRun() {
+  const t = nowT();
+  if (run.paused) { run.pausedMs += t - run.pauseAt; run.paused = false; }
+  closeStop(t); run.end = t;
+  run.coverage = covPct(); run.cellsTotal = cells.length;
+  run.points = yard.points.map(c => ({ id: c.id, name: c.name, type: c.type }));
+  run.expected = expectedRounds(run); run.compliance = compliance(run);
+  logEv('Fin de turno · ' + run.rounds.length + ' rondas · cumplimiento ' + (run.compliance ?? '–') + '%', null, 'acc');
+  stopGps(); stopSim(); simClock = null; releaseAwake();
+  const h = LS.get('rp_hist', []); h.unshift(slim(run)); LS.set('rp_hist', h.slice(0, 60));
+  LS.set('rp_run', null); renderHist();
+}
+function slim(r) { const o = Object.assign({}, r); delete o.anchor; delete o.near; delete o.overdue; return o; }
+let persistT = 0;
+function persist(force) { if (!run || run.end || viewing) return; const t = Date.now(); if (!force && t - persistT < 5000) return; persistT = t; LS.set('rp_run', run); }
+function elapsed(r) { const end = r.end || nowT(); return end - r.start - r.pausedMs - (r.paused ? end - r.pauseAt : 0); }
+function stoppedMs(r) { let s = r.stops.reduce((a, x) => a + x.dur, 0); if (r.inStop && r.anchor && !r.end) s += nowT() - r.anchor.t; return s; }
+function logEv(txt, p, kind) { if (!run) return; run.events.push({ t: nowT(), txt, k: kind || '', lat: p && p.lat, lng: p && p.lng }); renderEvents(); }
+function expectedRounds(r) { const pts = r.points || yard.points; if (!pts.length) return null; return Math.max(1, Math.floor(elapsed(r) / (cfg.freqMin * 60000))); }
+function compliance(r) { const e = expectedRounds(r); return e == null ? null : Math.min(100, Math.round(100 * r.rounds.length / e)); }
+function cpStatus(cp, r) {
+  const now = r.end || nowT(), due = cfg.freqMin * 60000, last = r.lastPass[cp.id];
+  if (last == null) return now - r.start >= due ? { k: 'bad', txt: 'Sin pasar' } : { k: 'idle', txt: 'Pendiente', left: due - (now - r.start) };
+  const s = now - last;
+  if (s >= due) return { k: 'bad', txt: 'Atrasado', since: s };
+  if (s >= due * 0.8) return { k: 'warn', txt: 'Toca pasar', since: s, left: due - s };
+  return { k: 'ok', txt: 'Al día', since: s, left: due - s };
+}
+function maxGap(cp, r) {
+  const ts = r.passes.filter(p => p.id === cp.id).map(p => p.t), end = r.end || nowT();
+  const all = [r.start, ...ts, end]; let g = 0;
+  for (let i = 1; i < all.length; i++) g = Math.max(g, all[i] - all[i - 1]);
+  return g;
+}
+
+/* Procesa cada posición del GPS (real o simulada) */
+function onFix(raw) {
+  const t = raw.t, acc = raw.acc;
+  lastFixAt = Date.now(); lastRawAcc = acc;
+  LS.set('rp_lastpos', { lat: raw.lat, lng: raw.lng });
+  gpsBadge(acc);
+  if (viewing) backToLive();
+  if (!run || run.end) { map.me(raw, acc); return; }
+  run.fixes++;
+  // 1) Descarta posiciones poco precisas (rebotes entre pilas de contenedores)
+  if (acc > cfg.maxAcc) { run.rejected++; return; }
+  // 2) Descarta saltos imposibles
+  if (run.last) {
+    const dt = (t - run.lastAcceptT) / 1000, d = hav(run.last, raw);
+    if (dt > 0 && d > Math.max(acc, 5) && d / dt * 3.6 > cfg.maxSpd) { run.rejected++; return; }
+    if (dt > 20) run.noSignalMs += (dt - 20) * 1000;
+  }
+  // 3) Suavizado
+  const p = kf.step(raw, acc, t); p.t = t; p.acc = acc;
+  map.me(p, acc);
+  let spd = 0;
+  if (run.last) {
+    const dt = (t - run.lastAcceptT) / 1000, d = hav(run.last, p);
+    spd = raw.speed != null && raw.speed >= 0 && acc <= 15 ? raw.speed * 3.6 : (dt > 0 ? d / dt * 3.6 : 0);
+    if (d < Math.min(acc * 0.4, 3)) spd = 0;
+  }
+  run.speed = run.speed * 0.5 + spd * 0.5;
+  // 4) Recorrido (ignora el temblor del GPS)
+  const lp = run.track[run.track.length - 1];
+  const step = lp ? hav(lp, p) : Infinity;
+  if (step >= Math.max(2.5, acc * 0.3)) {
+    if (lp) run.dist += step;
+    run.track.push({ lat: +p.lat.toFixed(7), lng: +p.lng.toFixed(7), t, a: Math.round(acc) });
+    map.trackAdd(p);
+    if (run.speed > run.maxSpeed && run.speed < cfg.maxSpd) run.maxSpeed = run.speed;
+  }
+  // 5) Patio vigilado
+  if (coverAt(p, t)) cells.forEach(c => { if (c.covered) run.covered[c.i + ',' + c.j] = c.at; });
+  // 6) Paradas
+  detectStop(p, t);
+  // 7) Control de paso por puntos y salidas
+  checkPoints(p, t, acc);
+  // 8) Fuera del recinto
+  if (proj) {
+    const ins = insideYard(p);
+    if (!ins && !run.outside && acc < 20) { run.outside = true; logEv('Sale del recinto', p, 'warn'); vibrate([200, 100, 200]); }
+    if (ins && run.outside) { run.outside = false; logEv('Vuelve al recinto', p, ''); }
+  }
+  run.last = { lat: p.lat, lng: p.lng }; run.lastAcceptT = t;
+  renderAll(); persist();
+}
+function checkPoints(p, t, acc) {
+  if (!yard.points.length) return;
+  const R = cfg.cpRad + Math.min(acc * 0.5, 10);
+  yard.points.forEach(cp => {
+    const d = hav(cp, p), near = d <= R;
+    if (near && !run.near[cp.id]) {
+      run.near[cp.id] = true;
+      const prev = run.lastPass[cp.id];
+      run.lastPass[cp.id] = t; run.overdue[cp.id] = false;
+      run.passes.push({ id: cp.id, name: cp.name, t, lat: +p.lat.toFixed(6), lng: +p.lng.toFixed(6) });
+      logEv('Paso por ' + cp.name + (prev ? ' (anterior ' + fmtAgo(t - prev) + ')' : ''), cp, 'ok');
+      vibrate(80);
+      if (!run.roundVisited[cp.id]) {
+        run.roundVisited[cp.id] = true;
+        if (yard.points.every(c => run.roundVisited[c.id])) {
+          const n = run.rounds.length + 1;
+          run.rounds.push({ n, start: run.roundStart, end: t, dur: t - run.roundStart });
+          logEv('Ronda ' + n + ' completa en ' + fmtMin(t - run.roundStart), cp, 'acc');
+          vibrate([120, 80, 120]);
+          run.roundVisited = { [cp.id]: true }; run.roundStart = t;
+        }
+      }
+    }
+    if (!near && d > R + 15) run.near[cp.id] = false;
+  });
+}
+function checkOverdue() {
+  if (!run || run.end || viewing) return;
+  yard.points.forEach(cp => {
+    const s = cpStatus(cp, run);
+    if (s.k === 'bad' && !run.overdue[cp.id]) { run.overdue[cp.id] = true; logEv('Sin pasar por ' + cp.name + ' en ' + cfg.freqMin + ' min', cp, 'bad'); vibrate([300, 100, 300]); }
+  });
+}
+function detectStop(p, t) {
+  const a = run.anchor;
+  if (!a) { run.anchor = { lat: p.lat, lng: p.lng, t, n: 1 }; return; }
+  const d = hav(a, p);
+  if (d <= cfg.stopRad + Math.min(p.acc * 0.3, 6)) {
+    a.lat = (a.lat * a.n + p.lat) / (a.n + 1); a.lng = (a.lng * a.n + p.lng) / (a.n + 1); a.n++;
+    if (!run.inStop && t - a.t >= cfg.stopSec * 1000) { run.inStop = true; run.speed = 0; }
+    if (run.inStop && cfg.stopAlarm > 0 && !run.alarmed && t - a.t >= cfg.stopAlarm * 60000) {
+      run.alarmed = true; vibrate([400, 150, 400]); logEv('Parado más de ' + cfg.stopAlarm + ' min', a, 'bad');
+    }
+  } else {
+    closeStop(t);
+    run.anchor = { lat: p.lat, lng: p.lng, t, n: 1 };
+  }
+}
+function closeStop(t) {
+  if (run && run.inStop && run.anchor) {
+    const s = { lat: run.anchor.lat, lng: run.anchor.lng, from: run.anchor.t, to: t, dur: t - run.anchor.t };
+    run.stops.push(s); map.stops(run.stops);
+    logEv('Parada de ' + fmtMin(s.dur) + ' (desde ' + fmtHM(s.from) + ')', s, s.dur >= cfg.stopAlarm * 60000 && cfg.stopAlarm > 0 ? 'bad' : 'warn');
+  }
+  if (run) { run.inStop = false; run.alarmed = false; }
+}
+
+/* ---------- GPS ---------- */
+function startGps() {
+  if (!navigator.geolocation) { banner('Este dispositivo no tiene GPS disponible.', 'bad'); return; }
+  if (watchId != null) return;
+  watchId = navigator.geolocation.watchPosition(
+    pos => onFix({ lat: pos.coords.latitude, lng: pos.coords.longitude, acc: pos.coords.accuracy, speed: pos.coords.speed, t: pos.timestamp || Date.now() }),
+    err => { banner(err.code === 1 ? 'Permiso de ubicación denegado. Actívalo para registrar las rondas.' : 'Sin señal GPS (' + err.message + ')', err.code === 1 ? 'bad' : 'warn', 6000); },
+    { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 });
+}
+function stopGps() { if (watchId != null) navigator.geolocation.clearWatch(watchId); watchId = null; }
+function gpsBadge(acc) {
+  const el = $('gpsdot');
+  if (acc == null) { el.textContent = 'GPS —'; el.style.color = ''; return; }
+  el.textContent = 'GPS ±' + Math.round(acc) + ' m';
+  el.style.color = acc <= Math.min(10, cfg.maxAcc) ? COL.grn : acc <= cfg.maxAcc ? COL.amb : COL.red;
+}
+async function keepAwake() { try { if ('wakeLock' in navigator) { wakeLock = await navigator.wakeLock.request('screen'); } } catch (e) { } }
+function releaseAwake() { try { wakeLock && wakeLock.release(); } catch (e) { } wakeLock = null; }
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && run && !run.end) { keepAwake(); }
+  if (document.visibilityState === 'hidden' && run && !run.end) persist(true);
+});
+window.addEventListener('pagehide', () => { if (run && !run.end && !viewing) persist(true); });
+
+/* ---------- Simulación ---------- */
+function stopSim() { if (simTimer) clearInterval(simTimer); simTimer = null; }
+function simulate(speedMs) {
+  if (yard.boundary.length < 3 || !yard.points.length) demoYard();
+  if (viewing) backToLive();
+  if (run && !run.end) finishRun();
+  stopGps(); simClock = Date.now(); startRun(true);
+  const P = proj, xs = P.poly.map(p => p.x), ys = P.poly.map(p => p.y);
+  const minX = Math.min(...xs) + 8, maxX = Math.max(...xs) - 8, minY = Math.min(...ys) + 8, maxY = Math.max(...ys) - 8;
+  // 3 vueltas por los pasillos; en la primera se salta la Puerta Este
+  const wp = [];
+  for (let lap = 0; lap < 3; lap++) {
+    let dir = 1;
+    for (let y = minY, row = 0; y <= maxY; y += 40, row++) {
+      if (row === 1 && lap > 0) wp.push([maxX - 2, -4]);
+      wp.push(dir > 0 ? [minX, y] : [maxX, y]); wp.push(dir > 0 ? [maxX * 0.6, y] : [minX * 0.4, y]); dir = -dir;
+    }
+    wp.push([minX, minY]);
+  }
+  let k = 0, x = wp[0][0], y = wp[0][1], t = nowT(), pause = 0, stopsDone = 0;
+  const v = 1.3;
+  simTimer = setInterval(() => {
+    for (let r = 0; r < 6; r++) {
+      t += 1000; simClock = t;
+      if (pause > 0) { pause--; } else {
+        const [tx, ty] = wp[k]; const dx = tx - x, dy = ty - y, d = Math.hypot(dx, dy);
+        if (d < v) {
+          k++;
+          if (k >= wp.length) { finishRun(); simClock = null; startRun(); banner('Simulación guardada en Turnos. Vuelve el seguimiento real.', '', 6000); return; }
+          if (k % 5 === 0 && stopsDone < 3) { pause = 60 + stopsDone * 200; stopsDone++; }
+        } else { x += dx / d * v; y += dy / d * v; }
+      }
+      const bad = Math.random() < 0.06;
+      const n = bad ? 40 : 3, acc = bad ? 35 + Math.random() * 30 : 4 + Math.random() * 6;
+      const p = P.ll(x + (Math.random() - .5) * n, y + (Math.random() - .5) * n);
+      onFix({ lat: p.lat, lng: p.lng, acc, speed: null, t });
+    }
+  }, speedMs || 100);
+}
+
+/* ---------- Render ---------- */
+let lastSig = '';
+function renderAll() { renderHeader(); renderControl(); renderInfo(); }
+function renderHeader() {
+  const r = run, now = nowT();
+  $('clock').textContent = fmtHM(now);
+  const st = $('status');
+  let txt = '—', k = 'idle';
+  if (viewing) { txt = 'TURNO GUARDADO'; k = 'idle'; }
+  else if (r && !r.end) {
+    if (!simTimer && Date.now() - lastFixAt > 30000) { txt = 'SIN SEÑAL'; k = 'bad'; }
+    else if (r.outside) { txt = 'FUERA DEL RECINTO'; k = 'warn'; }
+    else if (r.inStop) { txt = 'PARADO ' + fmtMin(now - r.anchor.t); k = r.alarmed ? 'bad' : 'warn'; }
+    else { txt = 'EN RONDA'; k = 'ok'; }
+  }
+  st.textContent = txt; st.className = 'pill ' + k;
+  if (!r) return;
+  const end = isFinite(r.periodEnd) ? r.periodEnd : null;
+  $('shiftLbl').textContent = (r.sim ? 'Simulación ' : 'Turno ') + fmtHM(r.start) + (end ? ' – ' + fmtHM(end) : r.end ? ' – ' + fmtHM(r.end) : '');
+  $('shiftBar').style.width = (end ? Math.min(100, 100 * (now - r.start) / (end - r.start)) : r.end ? 100 : 0) + '%';
+  $('guardLbl').textContent = r.guard ? '👤 ' + r.guard : '';
+  // KPIs
+  const exp = expectedRounds(r), comp = compliance(r);
+  setKpi('kRounds', String(r.rounds.length), exp != null ? 'de ' + exp + ' exigidas' : 'sin puntos', comp == null ? '' : comp >= 100 ? 'ok' : comp >= 60 ? 'warn' : 'bad');
+  const pts = yard.points, sts = pts.map(c => cpStatus(c, r));
+  const okN = sts.filter(s => s.k === 'ok' || s.k === 'warn').length, badN = sts.filter(s => s.k === 'bad').length;
+  setKpi('kComp', pts.length ? okN + '/' + pts.length : '–', badN ? badN + ' atrasados' : pts.length ? 'todo en orden' : '', !pts.length ? '' : badN ? 'bad' : sts.some(s => s.k === 'warn') ? 'warn' : 'ok');
+  const c = covPct();
+  setKpi('kCov', c == null ? '–' : c + '%', c == null ? 'sin límite' : 'del patio', c == null ? '' : c >= 80 ? 'ok' : c >= 50 ? 'warn' : 'bad');
+  setKpi('kStop', fmtDur(stoppedMs(r)), r.stops.length + (r.stops.length === 1 ? ' parada' : ' paradas'), r.inStop ? 'warn' : '');
+  setKpi('kDist', fmtDist(r.dist), fmtDur(elapsed(r)) + ' de turno');
+  setKpi('kSpeed', (!r.end && !r.inStop ? r.speed : 0).toFixed(1), 'km/h · máx ' + r.maxSpeed.toFixed(1));
+  const bc = $('badCnt'); bc.textContent = badN; bc.style.display = badN ? '' : 'none';
+}
+function renderControl() {
+  const r = run;
+  if (!r) return;
+  const pts = yard.points;
+  const box = $('roundBox');
+  if (!pts.length) {
+    box.innerHTML = '<div class="hd">Sin puntos de control</div><div class="sub">Añádelos en Configurar para controlar el paso por cada zona. Mientras, se registra el recorrido y el patio vigilado.</div>';
+  } else {
+    const done = pts.filter(c => r.roundVisited[c.id]).length, miss = pts.filter(c => !r.roundVisited[c.id]);
+    const last = r.rounds[r.rounds.length - 1];
+    box.innerHTML = '<div class="hd"><span>Ronda ' + (r.rounds.length + 1) + (r.end ? ' (sin terminar)' : ' en curso') + '</span><span class="num">' + done + ' / ' + pts.length + '</span></div>' +
+      '<div class="prog"><i style="width:' + (100 * done / pts.length) + '%"></i></div>' +
+      '<div class="sub">' + (miss.length ? 'Falta: ' + miss.map(c => esc(c.name)).join(', ') : 'Completa') + ' · ' + fmtMin((r.end || nowT()) - r.roundStart) + ' en esta ronda' + (last ? ' · última completa ' + fmtHM(last.end) + ' (' + fmtMin(last.dur) + ')' : '') + '</div>';
+  }
+  const rows = pts.map((c, k) => ({ c, k, s: cpStatus(c, r), n: r.passes.filter(p => p.id === c.id).length }));
+  const order = { bad: 0, warn: 1, idle: 2, ok: 3 };
+  rows.sort((a, b) => order[a.s.k] - order[b.s.k] || a.k - b.k);
+  $('cpList').innerHTML = rows.length ? rows.map(({ c, k, s, n }) => '<div class="cp ' + s.k + '" data-id="' + c.id + '"><div class="dot">' + shortName(c, k) + '</div><div class="nm">' + esc(c.name) + '</div>' +
+    '<div class="st"><b>' + s.txt + '</b><small>' + (s.since != null ? fmtAgo(s.since) : s.left != null ? 'quedan ' + fmtMin(s.left) : '') + '</small></div>' +
+    '<div class="sub">' + (c.type === 'salida' ? 'Salida · ' : '') + n + (n === 1 ? ' paso' : ' pasos') + (r.lastPass[c.id] ? ' · último ' + fmtHM(r.lastPass[c.id]) : '') + '</div></div>').join('')
+    : '<div class="empty">No hay puntos de control. Ve a Configurar → "+ Punto de control" y toca el mapa donde estén.</div>';
+  // marcadores con color de estado (solo si cambia algo)
+  const marks = pts.map((c, k) => ({ ...c, short: shortName(c, k), k: cpStatus(c, r).k }));
+  const sig = marks.map(m => m.id + m.k + m.name).join('|');
+  if (sig !== lastSig) { lastSig = sig; map.points(marks); }
+}
+function renderInfo() {
+  const r = run; if (!r) return;
+  const moving = Math.max(1, elapsed(r) - stoppedMs(r));
+  const rows = [
+    ['Vigilante', r.guard || '—'],
+    ['Inicio', fmtDate(r.start)],
+    ['Duración', fmtDur(elapsed(r))],
+    ['Recorrido', fmtDist(r.dist)],
+    ['Velocidad media en movimiento', (r.dist / moving * 3600).toFixed(1) + ' km/h'],
+    ['Velocidad máxima', r.maxSpeed.toFixed(1) + ' km/h'],
+    ['Rondas completas', r.rounds.length + (r.rounds.length ? ' (media ' + fmtMin(r.rounds.reduce((a, x) => a + x.dur, 0) / r.rounds.length) + ')' : '')],
+    ['Pasos por puntos', r.passes.length],
+    ['Paradas', r.stops.length + ' · ' + fmtDur(stoppedMs(r))],
+    ['Patio vigilado', (covPct() ?? '–') + '%'],
+    ['Posiciones GPS descartadas', r.rejected + ' de ' + r.fixes],
+    ['Tiempo sin señal válida', fmtDur(r.noSignalMs)]
+  ];
+  $('runInfo').innerHTML = rows.map(([a, b]) => '<div>' + a + '</div><div>' + esc(b) + '</div>').join('');
+}
+function renderEvents() {
+  const l = run ? run.events.slice().reverse().slice(0, 300) : [];
+  $('evList').innerHTML = l.map(e => '<li class="' + (e.k || '') + '"' + (e.lat ? ' data-go="' + e.lat + ',' + e.lng + '"' : '') + '><time class="num">' + fmtTime(e.t) + '</time><span class="b"></span><span>' + esc(e.txt) + '</span></li>').join('');
+}
+function renderHist() {
+  const h = LS.get('rp_hist', []);
+  $('histList').innerHTML = h.length ? h.map((r, k) => {
+    const c = r.compliance, cls = c == null ? 'idle' : c >= 100 ? 'ok' : c >= 60 ? 'warn' : 'bad';
+    return '<div class="card hist"><div class="score ' + cls + '" style="background:var(--' + (cls === 'idle' ? 'idle' : cls) + '-bg);color:var(--' + (cls === 'idle' ? 'mut' : cls) + ')">' + (c == null ? '–' : c + '%') + '</div>' +
+      '<div class="grow"><b>' + fmtDate(r.start) + ' – ' + fmtHM(r.end) + '</b>' + (r.sim ? ' <span class="pill idle">prueba</span>' : '') +
+      '<div class="mut">' + (r.guard ? esc(r.guard) + ' · ' : '') + r.rounds.length + '/' + (r.expected ?? '–') + ' rondas · ' + fmtDist(r.dist) + ' · ' + r.stops.length + ' paradas · ' + (r.coverage ?? '–') + '% patio</div>' +
+      '<div class="row" style="margin:6px 0 0"><button class="btn sm" data-view="' + k + '">Ver en mapa</button><button class="btn sm" data-rep="' + k + '">Informe</button><button class="btn sm" data-csv="' + k + '">Excel</button><button class="btn sm" data-gpx="' + k + '">GPX</button></div></div></div>';
+  }).join('') : '<div class="empty">Aún no hay turnos guardados. Cada turno se guarda solo al cambiar de turno.</div>';
+}
+let viewing = null;
+function viewRun(r) {
+  if (viewing) backToLive();
+  viewing = { live: run }; run = r; redrawYard();
+  map.track(r.track); map.stops(r.stops); map.me(null);
+  if (r.track.length) map.fit(r.track);
+  renderEvents(); renderAll(); switchTab('pControl');
+  banner('Viendo el turno del ' + fmtDate(r.start) + '. Toca aquí para volver al turno en vivo.', 'warn');
+  $('banner').onclick = backToLive;
+}
+function backToLive() {
+  if (!viewing) return;
+  run = viewing.live; viewing = null; $('banner').onclick = null; banner('');
+  redrawYard(); map.track(run.track); map.stops(run.stops); renderEvents(); renderAll();
+}
+
+/* ---------- Informe imprimible (PDF) ---------- */
+function report(r) {
+  const pts = (r.points && r.end ? r.points : yard.points);
+  const end = r.end || nowT(), due = cfg.freqMin * 60000;
+  const cov = r.end ? r.coverage : covPct(), exp = r.end ? r.expected : expectedRounds(r), comp = r.end ? r.compliance : compliance(r);
+  const cls = v => v == null ? '' : v >= 100 ? 'g' : v >= 60 ? 'a' : 'r';
+  const ptRows = pts.map(c => { const n = r.passes.filter(p => p.id === c.id).length, g = maxGap(c, r), last = r.lastPass[c.id];
+    return '<tr><td>' + esc(c.name) + (c.type === 'salida' ? ' (salida)' : '') + '</td><td>' + n + '</td><td>' + (last ? fmtTime(last) : '<span class="r">nunca</span>') + '</td><td class="' + (g > due ? 'r' : 'g') + '">' + fmtMin(g) + '</td></tr>'; }).join('');
+  const rRows = r.rounds.map(x => '<tr><td>' + x.n + '</td><td>' + fmtTime(x.start) + '</td><td>' + fmtTime(x.end) + '</td><td>' + fmtMin(x.dur) + '</td></tr>').join('');
+  const sRows = r.stops.map((s, k) => '<tr><td>' + (k + 1) + '</td><td>' + fmtTime(s.from) + '</td><td>' + fmtTime(s.to) + '</td><td class="' + (cfg.stopAlarm && s.dur >= cfg.stopAlarm * 60000 ? 'r' : '') + '">' + fmtMin(s.dur) + '</td><td>' + s.lat.toFixed(5) + ', ' + s.lng.toFixed(5) + '</td></tr>').join('');
+  const eRows = r.events.filter(e => e.k === 'bad' || e.k === 'warn').map(e => '<tr><td>' + fmtTime(e.t) + '</td><td>' + esc(e.txt) + '</td></tr>').join('');
+  $('report').innerHTML =
+    '<h1>Informe de rondas de vigilancia</h1><div>' + esc($('siteName').textContent) + ' · ' + (r.sim ? 'SIMULACIÓN · ' : '') + fmtDate(r.start) + ' – ' + fmtDate(end) + '</div>' +
+    '<div>Vigilante: <b>' + esc(r.guard || '—') + '</b> · Paso exigido cada ' + cfg.freqMin + ' min por ' + pts.length + ' puntos</div>' +
+    '<div class="kp"><div>Rondas completas<b class="' + cls(comp) + '">' + r.rounds.length + ' / ' + (exp ?? '–') + '</b></div><div>Cumplimiento<b class="' + cls(comp) + '">' + (comp ?? '–') + '%</b></div><div>Patio vigilado<b>' + (cov ?? '–') + '%</b></div><div>Tiempo parado<b>' + fmtDur(stoppedMs(r)) + '</b></div></div>' +
+    '<div class="kp"><div>Recorrido<b>' + fmtDist(r.dist) + '</b></div><div>Duración<b>' + fmtDur(elapsed(r)) + '</b></div><div>Paradas<b>' + r.stops.length + '</b></div><div>Sin señal GPS<b>' + fmtDur(r.noSignalMs) + '</b></div></div>' +
+    '<h2>Control de paso por puntos</h2><table><tr><th>Punto</th><th>Pasos</th><th>Último paso</th><th>Mayor tiempo sin pasar</th></tr>' + (ptRows || '<tr><td colspan=4>Sin puntos definidos</td></tr>') + '</table>' +
+    '<h2>Rondas completas</h2><table><tr><th>Nº</th><th>Inicio</th><th>Fin</th><th>Duración</th></tr>' + (rRows || '<tr><td colspan=4 class="r">Ninguna ronda completa</td></tr>') + '</table>' +
+    '<h2>Paradas</h2><table><tr><th>Nº</th><th>Desde</th><th>Hasta</th><th>Duración</th><th>Posición</th></tr>' + (sRows || '<tr><td colspan=5>Sin paradas</td></tr>') + '</table>' +
+    '<h2>Incidencias</h2><table><tr><th>Hora</th><th>Detalle</th></tr>' + (eRows || '<tr><td colspan=2>Sin incidencias</td></tr>') + '</table>' +
+    '<div class="sig"><div>Firma del vigilante</div><div>Firma del supervisor</div></div>';
+  setTimeout(() => window.print(), 50);
+}
+
+/* ---------- Exportar ---------- */
+function download(name, text, type) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500); }
+function stamp(t) { return new Date(t).toISOString().slice(0, 16).replace(/[:T]/g, '-'); }
+function toGpx(r) {
+  const pts = r.track.map(p => '<trkpt lat="' + p.lat + '" lon="' + p.lng + '"><time>' + new Date(p.t).toISOString() + '</time></trkpt>').join('\n');
+  const wps = r.stops.map((s, k) => '<wpt lat="' + s.lat + '" lon="' + s.lng + '"><time>' + new Date(s.from).toISOString() + '</time><name>Parada ' + (k + 1) + ' (' + fmtDur(s.dur) + ')</name></wpt>').join('\n');
+  return '<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="Control de Rondas" xmlns="http://www.topografix.com/GPX/1/1">\n' + wps + '\n<trk><name>Turno ' + esc(r.guard || '') + ' ' + fmtDate(r.start) + '</name><trkseg>\n' + pts + '\n</trkseg></trk>\n</gpx>';
+}
+function toCsv(r) {
+  const q = s => '"' + String(s).replace(/"/g, "'") + '"';
+  const L = ['tipo;hora;hasta;duracion_min;punto;lat;lng;detalle'];
+  r.passes.forEach(p => L.push(['paso', fmtTime(p.t), '', '', q(p.name), p.lat, p.lng, ''].join(';')));
+  r.rounds.forEach(x => L.push(['ronda', fmtTime(x.start), fmtTime(x.end), Math.round(x.dur / 60000), '', '', '', 'Ronda ' + x.n].join(';')));
+  r.stops.forEach((s, k) => L.push(['parada', fmtTime(s.from), fmtTime(s.to), Math.round(s.dur / 60000), '', s.lat.toFixed(6), s.lng.toFixed(6), 'Parada ' + (k + 1)].join(';')));
+  r.events.filter(e => e.k === 'bad' || e.k === 'warn').forEach(e => L.push(['incidencia', fmtTime(e.t), '', '', '', e.lat ? e.lat.toFixed(6) : '', e.lng ? e.lng.toFixed(6) : '', q(e.txt)].join(';')));
+  L.push(['resumen', fmtDate(r.start), r.end ? fmtDate(r.end) : '', Math.round(elapsed(r) / 60000), '', '', '', q(r.rounds.length + '/' + (r.expected ?? '-') + ' rondas, ' + fmtDist(r.dist) + ', ' + (r.coverage ?? '-') + '% patio, vigilante ' + (r.guard || '-'))].join(';'));
+  return '﻿' + L.join('\n');
+}
+
+/* ---------- Pestañas y eventos ---------- */
+function switchTab(id) { document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.p === id)); document.querySelectorAll('.pane').forEach(p => p.classList.toggle('on', p.id === id)); }
+function startEdit(mode, msg) { editMode = mode; document.body.classList.add('mode-edit'); banner(msg, 'warn'); }
+function endEdit() { editMode = null; document.body.classList.remove('mode-edit'); $('drawRow').style.display = 'none'; banner(''); }
+function bind() {
+  document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => switchTab(b.dataset.p));
+  $('guard').onchange = () => { const g = $('guard').value.trim(); LS.set('rp_guard', g); if (run && !run.end && !viewing) { run.guard = g; logEv('Vigilante: ' + (g || '—'), null, 'acc'); persist(true); renderAll(); } };
+  $('locate').onclick = () => { const p = viewing ? null : (run && run.last) || LS.get('rp_lastpos', null); if (p) map.center(p, 18); else if (viewing) backToLive(); else banner('Buscando señal GPS…', '', 3000); };
+  $('bSim').onclick = () => { if (confirm('Se guardará el turno actual y se simularán 3 rondas de prueba. ¿Continuar?')) simulate(); };
+  $('bDraw').onclick = () => { draft = []; $('drawRow').style.display = 'flex'; startEdit('boundary', 'Toca el mapa en cada esquina del patio y pulsa "Terminar límite".'); };
+  $('bUndo').onclick = () => { draft.pop(); map.draft(draft); };
+  $('bDone').onclick = () => { if (draft.length < 3) { banner('Hacen falta al menos 3 puntos.', 'warn', 3000); return; } yard.boundary = draft; draft = []; endEdit(); saveYard(); };
+  $('bCancel').onclick = () => { draft = []; endEdit(); map.draft([]); };
+  $('bPoint').onclick = () => startEdit('punto', 'Toca en el mapa dónde está el punto de control.');
+  $('bExit').onclick = () => startEdit('salida', 'Toca en el mapa la salida al exterior.');
+  $('bDemo').onclick = () => { if (!yard.points.length || confirm('Se sustituirá el patio actual por uno de ejemplo. ¿Continuar?')) demoYard(); };
+  $('bClearYard').onclick = () => { if (confirm('¿Borrar el límite y todos los puntos de control?')) { yard = { boundary: [], points: [] }; saveYard(); } };
+  $('bExportYard').onclick = () => download('patio.json', JSON.stringify(yard, null, 1), 'application/json');
+  $('bImportYard').onclick = () => $('fileYard').click();
+  $('fileYard').onchange = e => { const f = e.target.files[0]; if (!f) return; f.text().then(t => { const y = JSON.parse(t); if (!Array.isArray(y.boundary)) throw 0; yard = { boundary: y.boundary, points: y.points || (y.exits || []).map((x, k) => ({ id: 'x' + k, name: x.name, type: 'salida', lat: x.lat, lng: x.lng })) }; saveYard(); map.fit(yard.boundary); }).catch(() => banner('Archivo de patio no válido', 'bad', 4000)); };
+  $('cpEdit').onclick = e => {
+    const d = e.target.dataset;
+    if (d.del != null && confirm('¿Quitar "' + yard.points[+d.del].name + '"?')) { yard.points.splice(+d.del, 1); saveYard(); }
+    if (d.ren != null) { const n = prompt('Nuevo nombre', yard.points[+d.ren].name); if (n) { yard.points[+d.ren].name = n; saveYard(); } }
+  };
+  $('cpList').onclick = e => { const el = e.target.closest('[data-id]'); if (el) focusPoint(el.dataset.id); };
+  $('bSave').onclick = () => {
+    const oldKey = cfg.gkey;
+    cfg.gkey = $('gkey').value.trim();
+    ['maxAcc', 'maxSpd', 'stopSec', 'stopRad', 'stopAlarm', 'covRad', 'freqMin', 'cpRad'].forEach(k => { const v = +$(k).value; cfg[k] = isFinite(v) && $(k).value !== '' && v >= 0 ? v : DEF_CFG[k]; });
+    cfg.shifts = $('shifts').value.trim();
+    if (run && !run.end && isFinite(run.periodEnd)) run.periodEnd = nextShift(run.start);
+    LS.set('rp_cfg', cfg); fillCfg(); redrawYard();
+    if (cfg.gkey !== oldKey) { persist(true); location.reload(); } else banner('Configuración guardada', '', 2000);
+  };
+  $('evList').onclick = e => { const li = e.target.closest('[data-go]'); if (li) { const [lat, lng] = li.dataset.go.split(',').map(Number); map.center({ lat, lng }, 19); } };
+  $('bReportNow').onclick = () => report(viewing ? viewing.live : run);
+  $('histList').onclick = e => {
+    const h = LS.get('rp_hist', []), d = e.target.dataset;
+    if (d.view != null) viewRun(h[+d.view]);
+    if (d.rep != null) report(h[+d.rep]);
+    if (d.gpx != null) { const r = h[+d.gpx]; download('turno-' + stamp(r.start) + '.gpx', toGpx(r), 'application/gpx+xml'); }
+    if (d.csv != null) { const r = h[+d.csv]; download('turno-' + stamp(r.start) + '.csv', toCsv(r), 'text/csv'); }
+  };
+}
+function fillCfg() { Object.keys(DEF_CFG).forEach(k => { if ($(k)) $(k).value = cfg[k]; }); }
+
+/* ---------- Arranque ---------- */
+(async function main() {
+  bind(); fillCfg();
+  $('guard').value = LS.get('rp_guard', '');
+  await initMap();
+  const saved = LS.get('rp_run', null);
+  if (saved && !saved.end && !saved.sim && Date.now() < (saved.periodEnd || nextShift(saved.start))) {
+    run = Object.assign(newRun(), saved); run.anchor = null; run.inStop = false; run.near = {}; run.overdue = run.overdue || {};
+    run.periodEnd = saved.periodEnd || nextShift(saved.start);
+    redrawYard(); map.track(run.track); map.stops(run.stops);
+    startGps(); keepAwake();
+  } else {
+    if (saved && !saved.end) { run = Object.assign(newRun(), saved); redrawYard(); finishRun(); }
+    run = null; startRun();
+  }
+  renderEvents(); renderHist(); renderAll();
+  setInterval(() => {
+    if (run && !run.end && !viewing && !simTimer && nowT() >= run.periodEnd) { finishRun(); startRun(); renderEvents(); }
+    checkOverdue(); renderAll();
+    if (run && !run.end && !viewing && !simTimer && Date.now() - lastFixAt > 30000 && watchId != null) banner('Sin señal GPS desde hace ' + fmtDur(Date.now() - lastFixAt) + '. Sal de entre los contenedores para recuperarla.', 'warn');
+  }, 1000);
+  if ('serviceWorker' in navigator && location.protocol.startsWith('http') && !window.Capacitor) navigator.serviceWorker.register('sw.js').catch(() => { });
+})();

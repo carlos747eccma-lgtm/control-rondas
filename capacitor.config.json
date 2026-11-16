@@ -1,0 +1,7 @@
+{
+  "appId": "com.controlrondas.app",
+  "appName": "Control de Rondas",
+  "webDir": "www",
+  "android": { "allowMixedContent": false },
+  "server": { "androidScheme": "https" }
+}
