@@ -283,9 +283,9 @@ setInterval(() => {
   const dt = nowT() - run.anchor.t, lim = cfg.stopAlarm * 60000;
   if (dt >= lim) {
     if (!run.alarmed) { run.alarmed = true; logEv('Parado más de ' + cfg.stopAlarm + ' min', run.anchor, 'bad'); }
-    if (!run.lastAlarm || Date.now() - run.lastAlarm >= 30000) { run.lastAlarm = Date.now(); SND.alarm(); banner('PARADO MÁS DE ' + cfg.stopAlarm + ' MIN: muévete, queda registrado como incidencia', 'bad', 8000); }
+    if (!run.lastAlarm || Date.now() - run.lastAlarm >= 30000) { run.lastAlarm = Date.now(); if (!run.stopNotif) SND.alarm(); banner('PARADO MÁS DE ' + cfg.stopAlarm + ' MIN: muévete, queda registrado como incidencia', 'bad', 8000); }
   } else if (cfg.stopAlarm >= 2 && dt >= lim - 60000 && !run.prewarned) {
-    run.prewarned = true; SND.warn(); banner('Llevas ' + fmtMin(dt) + ' parado: en 1 min salta la alarma', 'warn', 6000);
+    run.prewarned = true; if (!run.stopNotif) SND.warn(); banner('Llevas ' + fmtMin(dt) + ' parado: en 1 min salta la alarma', 'warn', 6000);
   }
 }, 3000);
 function vibrate(p) { try { navigator.vibrate && navigator.vibrate(p); } catch (e) { } }
@@ -492,7 +492,7 @@ function checkSpeed(spd, p, t, acc) {
   if (!lim) return;
   if (spd > lim && acc <= 20) {
     run.osN = (run.osN || 0) + 1; run.osLow = 0;
-    if (!run.os && run.osN >= 3) { run.os = { from: t, to: t, max: spd, lat: p.lat, lng: p.lng }; SND.speed(); banner('Más de ' + lim + ' km/h: queda registrado', 'bad', 5000); }
+    if (!run.os && run.osN >= 3) { run.os = { from: t, to: t, max: spd, lat: p.lat, lng: p.lng }; SND.speed(); notify([{ id: 9100 + (run.speeding.length % 50), title: '⚠ Más de ' + lim + ' km/h', body: Math.round(spd) + ' km/h a las ' + fmtHM(t) + ': queda registrado' }]); banner('Más de ' + lim + ' km/h: queda registrado', 'bad', 5000); }
     else if (run.os) { run.os.to = t; if (spd > run.os.max) { run.os.max = spd; run.os.lat = p.lat; run.os.lng = p.lng; } }
   } else {
     run.osN = 0;
@@ -553,9 +553,9 @@ function detectStop(p, t) {
   const d = hav(a, p);
   if (d <= cfg.stopRad + Math.min(p.acc * 0.3, 6)) {
     a.lat = (a.lat * a.n + p.lat) / (a.n + 1); a.lng = (a.lng * a.n + p.lng) / (a.n + 1); a.n++;
-    if (!run.inStop && t - a.t >= cfg.stopSec * 1000) { run.inStop = true; run.speed = 0; }
+    if (!run.inStop && t - a.t >= cfg.stopSec * 1000) { run.inStop = true; run.speed = 0; scheduleStopAlarm(); }
     if (run.inStop && cfg.stopAlarm > 0 && !run.alarmed && t - a.t >= cfg.stopAlarm * 60000) {
-      run.alarmed = true; run.lastAlarm = Date.now(); SND.alarm(); logEv('Parado más de ' + cfg.stopAlarm + ' min', a, 'bad');
+      run.alarmed = true; run.lastAlarm = Date.now(); if (!run.stopNotif) SND.alarm(); logEv('Parado más de ' + cfg.stopAlarm + ' min', a, 'bad');
     }
   } else {
     closeStop(t);
@@ -568,11 +568,47 @@ function closeStop(t) {
     run.stops.push(s); map.stops(markList(run));
     logEv('Parada de ' + fmtMin(s.dur) + ' (desde ' + fmtHM(s.from) + ')', s, s.dur >= cfg.stopAlarm * 60000 && cfg.stopAlarm > 0 ? 'bad' : 'warn');
   }
-  if (run) { run.inStop = false; run.alarmed = false; run.prewarned = false; run.lastAlarm = 0; }
+  if (run) { cancelStopAlarm(); run.inStop = false; run.alarmed = false; run.prewarned = false; run.lastAlarm = 0; }
 }
 
 /* ---------- GPS ---------- */
+/* ---------- Nativo (APK): GPS en segundo plano y alarmas como notificación ---------- */
+const CAP = window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform() ? window.Capacitor.Plugins : null;
+const BG = CAP && CAP.BackgroundGeolocation, LN = CAP && CAP.LocalNotifications;
+let bgWatch = null, lnReady = null;
+function notifReady() {
+  if (!LN) return Promise.resolve(false);
+  return lnReady = lnReady || (async () => {
+    try {
+      const p = await LN.requestPermissions(); if (p.display !== 'granted') return false;
+      await LN.createChannel({ id: 'alarma', name: 'Alarmas de ronda', description: 'Paradas largas y excesos de velocidad', importance: 5, visibility: 1, sound: 'alarma.wav', vibration: true, lights: true, lightColor: '#FF0000' });
+      return true;
+    } catch (e) { return false; }
+  })();
+}
+async function notify(items) { // items: [{id, title, body, at?}]
+  if (!(await notifReady())) return;
+  try { await LN.schedule({ notifications: items.map(n => ({ id: n.id, title: n.title, body: n.body, channelId: 'alarma', smallIcon: 'ic_stat_alarm', schedule: n.at ? { at: new Date(n.at), allowWhileIdle: true } : undefined })) }); } catch (e) { }
+}
+const STOP_IDS = Array.from({ length: 22 }, (_, i) => 9000 + i);
+// al empezar una parada se programan el aviso y la alarma en el sistema: suenan aunque la pantalla esté apagada
+function scheduleStopAlarm() {
+  if (!LN || !run || run.sim || !run.anchor || !(cfg.stopAlarm > 0)) return;
+  const at0 = run.anchor.t + cfg.stopAlarm * 60000, now = Date.now(), list = [];
+  if (cfg.stopAlarm >= 2) list.push({ id: STOP_IDS[0], at: at0 - 60000, title: 'Llevas ' + (cfg.stopAlarm - 1) + ' min parado', body: 'Muévete: en 1 minuto salta la alarma' });
+  for (let k = 0; k < 20; k++) list.push({ id: STOP_IDS[k + 1], at: at0 + k * 30000, title: '⚠ PARADO MÁS DE ' + (cfg.stopAlarm + Math.floor(k / 2)) + ' MIN', body: 'Queda registrado como incidencia. Muévete para que pare la alarma.' });
+  run.stopNotif = true; notify(list.filter(n => n.at > now - 5000).map(n => ({ ...n, at: Math.max(n.at, now + 1000) })));
+}
+function cancelStopAlarm() { if (!LN || !run || !run.stopNotif) return; run.stopNotif = false; LN.cancel({ notifications: STOP_IDS.map(id => ({ id })) }).catch(() => { }); }
 function startGps() {
+  if (BG) {
+    if (bgWatch != null) return; bgWatch = 'pending'; notifReady();
+    BG.addWatcher({ backgroundTitle: 'Control de Rondas', backgroundMessage: 'Vigilancia GPS activa', requestPermissions: true, stale: false, distanceFilter: 0 }, (loc, err) => {
+      if (err) { banner(err.code === 'NOT_AUTHORIZED' ? 'Permiso de ubicación denegado. Actívalo en Ajustes para registrar las rondas.' : 'Sin señal GPS (' + err.message + ')', err.code === 'NOT_AUTHORIZED' ? 'bad' : 'warn', 6000); if (err.code === 'NOT_AUTHORIZED') setTimeout(() => BG.openSettings(), 2500); return; }
+      if (loc) onFix({ lat: loc.latitude, lng: loc.longitude, acc: loc.accuracy, speed: loc.speed, t: loc.time || Date.now() });
+    }).then(id => { bgWatch = id; }).catch(e => { bgWatch = null; banner('No se pudo iniciar el GPS: ' + e.message, 'bad', 6000); });
+    return;
+  }
   if (!navigator.geolocation) { banner('Este dispositivo no tiene GPS disponible.', 'bad'); return; }
   if (watchId != null) return;
   watchId = navigator.geolocation.watchPosition(
@@ -580,14 +616,14 @@ function startGps() {
     err => { banner(err.code === 1 ? 'Permiso de ubicación denegado. Actívalo para registrar las rondas.' : 'Sin señal GPS (' + err.message + ')', err.code === 1 ? 'bad' : 'warn', 6000); },
     { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 });
 }
-function stopGps() { if (watchId != null) navigator.geolocation.clearWatch(watchId); watchId = null; }
+function stopGps() { if (BG && bgWatch != null && bgWatch !== 'pending') { BG.removeWatcher({ id: bgWatch }).catch(() => { }); } if (BG) bgWatch = null; if (watchId != null) navigator.geolocation.clearWatch(watchId); watchId = null; }
 function gpsBadge(acc) {
   const el = $('gpsdot');
   if (acc == null) { el.textContent = 'GPS —'; el.style.color = ''; return; }
   el.textContent = 'GPS ±' + Math.round(acc) + ' m';
   el.style.color = acc <= Math.min(10, cfg.maxAcc) ? COL.grn : acc <= cfg.maxAcc ? COL.amb : COL.red;
 }
-async function keepAwake() { try { if ('wakeLock' in navigator) { wakeLock = await navigator.wakeLock.request('screen'); } } catch (e) { } }
+async function keepAwake() { if (CAP) return; try { if ('wakeLock' in navigator) { wakeLock = await navigator.wakeLock.request('screen'); } } catch (e) { } }
 function releaseAwake() { try { wakeLock && wakeLock.release(); } catch (e) { } wakeLock = null; }
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && run && !run.end) { keepAwake(); }
@@ -1010,7 +1046,7 @@ function bind() {
   };
   $('evList').onclick = e => { const li = e.target.closest('[data-go]'); if (li) { const [lat, lng] = li.dataset.go.split(',').map(Number); map.center({ lat, lng }, 19); } };
   const cur = () => viewing ? viewing.live : run;
-  $('bBeep').onclick = () => SND.alarm();
+  $('bBeep').onclick = () => { SND.alarm(); notify([{ id: 9199, at: Date.now() + 10000, title: 'Prueba de alarma', body: 'Así suena la alarma con la pantalla apagada' }]); if (LN) banner('Apaga la pantalla: en 10 s suena la alarma de prueba', '', 8000); };
   $('bReportNow').onclick = () => sharePdf(cur()).catch(err => banner('No se pudo crear el PDF: ' + err.message, 'bad', 5000));
   $('bXlsNow').onclick = () => shareXlsx(cur()).catch(err => banner('No se pudo crear el Excel: ' + err.message, 'bad', 5000));
   $('bXlsAll').onclick = () => shareAllXlsx().catch(err => banner('No se pudo crear el Excel: ' + err.message, 'bad', 5000));

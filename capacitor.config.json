@@ -2,6 +2,18 @@
   "appId": "com.controlrondas.app",
   "appName": "Control de Rondas",
   "webDir": "www",
-  "android": { "allowMixedContent": false },
-  "server": { "androidScheme": "https" }
+  "android": {
+    "allowMixedContent": false,
+    "useLegacyBridge": true
+  },
+  "server": {
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_alarm",
+      "iconColor": "#DC2626",
+      "sound": "alarma.wav"
+    }
+  }
 }

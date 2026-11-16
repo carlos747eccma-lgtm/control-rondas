@@ -51,26 +51,49 @@ jobs:
       - name: Permisos de ubicación y pantalla encendida
         run: |
           M=android/app/src/main/AndroidManifest.xml
-          sed -i 's|<application|<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n    <uses-permission android:name="android.permission.VIBRATE" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />\n    <uses-feature android:name="android.hardware.location.gps" android:required="false" />\n\n    <application|' $M
+          sed -i 's|<application|<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n    <uses-permission android:name="android.permission.VIBRATE" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />\n    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />\n    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />\n    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <uses-feature android:name="android.hardware.location.gps" android:required="false" />\n\n    <application|' $M
           F=$(find android/app/src/main/java -name MainActivity.java)
           cat > "$F" <<'JAVA'
           package com.controlrondas.app;
 
+          import android.content.Intent;
+          import android.net.Uri;
+          import android.os.Build;
           import android.os.Bundle;
-          import android.view.WindowManager;
+          import android.os.PowerManager;
+          import android.provider.Settings;
           import com.getcapacitor.BridgeActivity;
 
           public class MainActivity extends BridgeActivity {
               @Override
               public void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
-                  // La ronda necesita el GPS activo: la pantalla no se apaga sola con la app abierta
-                  getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                  // Para que el GPS y las alarmas sigan con la pantalla apagada: pedir que no se optimice la bateria
+                  try {
+                      PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+                      if (Build.VERSION.SDK_INT >= 23 && pm != null && !pm.isIgnoringBatteryOptimizations(getPackageName())) {
+                          Intent i = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                          i.setData(Uri.parse("package:" + getPackageName()));
+                          startActivity(i);
+                      }
+                  } catch (Exception e) { }
+              }
+
+              @Override
+              public void onPause() {
+                  super.onPause();
+                  // no congelar el JavaScript al apagar la pantalla
+                  try { getBridge().getWebView().resumeTimers(); getBridge().getWebView().onResume(); } catch (Exception e) { }
               }
           }
           JAVA
           sed -i 's/^          //' "$F"
           cat $M
+      - name: Sonido de alarma e icono de notificación
+        run: |
+          mkdir -p android/app/src/main/res/raw android/app/src/main/res/drawable
+          cp native/raw/alarma.wav android/app/src/main/res/raw/
+          cp native/drawable/ic_stat_alarm.xml android/app/src/main/res/drawable/
       - name: Firma fija (para poder actualizar sin desinstalar)
         run: |
           mkdir -p ~/.android
