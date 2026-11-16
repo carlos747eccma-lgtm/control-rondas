@@ -406,7 +406,8 @@ let persistT = 0;
 function persist(force) { if (!run || run.end || viewing) return; const t = Date.now(); if (!force && t - persistT < 5000) return; persistT = t; LS.set('rp_run', run); }
 function elapsed(r) { const end = r.end || nowT(); return end - r.start - r.pausedMs - (r.paused ? end - r.pauseAt : 0); }
 function stoppedMs(r) { let s = r.stops.reduce((a, x) => a + x.dur, 0); if (r.inStop && r.anchor && !r.end) s += nowT() - r.anchor.t; return s; }
-function logEv(txt, p, kind) { if (!run) return; run.events.push({ t: nowT(), txt, k: kind || '', lat: p && p.lat, lng: p && p.lng }); renderEvents(); }
+let evT = null; // hora de la posición que se está procesando (las recogidas del servicio nativo llegan con retraso)
+function logEv(txt, p, kind) { if (!run) return; run.events.push({ t: evT != null ? evT : nowT(), txt, k: kind || '', lat: p && p.lat, lng: p && p.lng }); renderEvents(); }
 function expectedRounds(r) { const pts = r.points || yard.points; if (!pts.length) return null; return Math.max(1, Math.floor(elapsed(r) / (cfg.freqMin * 60000))); }
 function compliance(r) { const e = expectedRounds(r); return e == null ? null : Math.min(100, Math.round(100 * r.rounds.length / e)); }
 function cpStatus(cp, r) {
@@ -577,7 +578,7 @@ function closeStop(t) {
 const CAP = window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform() ? window.Capacitor.Plugins : null;
 const RN = CAP && CAP.RondasNative; // servicio nativo propio: GPS + alarmas con la pantalla apagada
 const BG = !RN && CAP && CAP.BackgroundGeolocation, LN = !RN && CAP && CAP.LocalNotifications;
-let rnListen = false, rnBusy = false;
+let rnListen = false, rnBusy = false, rnLastT = 0;
 // recoge las posiciones que el servicio nativo guardó (también las de pantalla bloqueada) y las procesa en orden
 async function rnDrain() {
   if (rnBusy) return; rnBusy = true;
@@ -587,9 +588,12 @@ async function rnDrain() {
       const r = await RN.drain({ since }); const list = (r && r.fixes) || [];
       if (!list.length) { if (!LS.get('rp_rnsince')) LS.set('rp_rnsince', since); break; }
       const many = list.length > 5; fixBatch = many;
-      list.forEach(f => { if (!run || run.end || f[4] >= (run.start || 0) - 1000) onFix({ lat: f[0], lng: f[1], acc: f[2], speed: f[3] < 0 ? null : f[3], t: f[4] }); });
+      list.forEach(f => {
+        if (f[4] <= rnLastT) return; rnLastT = f[4]; // nunca procesar dos veces ni hacia atrás
+        if (!run || run.end || f[4] >= (run.start || 0) - 1000) { evT = f[4]; try { onFix({ lat: f[0], lng: f[1], acc: f[2], speed: f[3] < 0 ? null : f[3], t: f[4] }); } finally { evT = null; } }
+      });
       LS.set('rp_rnsince', list[list.length - 1][4]);
-      if (many) { fixBatch = false; if (run) { map.track(run.track); renderAll(); persist(true); } }
+      if (many) { fixBatch = false; if (run) { run.events.sort((a, b) => a.t - b.t); map.track(run.track); map.stops(markList(run)); renderEvents(); renderAll(); persist(true); } }
       if (list.length < 5000) break;
     }
   } catch (e) { fixBatch = false; }
@@ -1095,6 +1099,13 @@ function fillCfg() { Object.keys(DEF_CFG).forEach(k => { if ($(k)) $(k).value = 
   if (saved && !saved.end && !saved.sim && Date.now() < (saved.periodEnd || nextShift(saved.start))) {
     run = Object.assign(newRun(), saved); run.anchor = null; run.inStop = false; run.near = {}; run.overdue = run.overdue || {};
     run.periodEnd = saved.periodEnd || nextShift(saved.start);
+    if (RN && !LS.get('rp_fix15')) { // v1.0.14 repetía posiciones: se rehace el turno desde las posiciones guardadas en el móvil
+      LS.set('rp_fix15', 1);
+      const keep = { id: run.id, start: run.start, roundStart: run.roundStart, periodEnd: run.periodEnd, shiftLabel: run.shiftLabel, guard: run.guard };
+      run = Object.assign(newRun(), keep); cells.forEach(c => { c.covered = false; c.at = null; });
+      evT = run.start; logEv('Inicio de turno' + (run.shiftLabel ? ' ' + run.shiftLabel : '') + (run.guard ? ' · ' + run.guard : '') + ' (recalculado)', null, 'acc'); evT = null;
+      LS.set('rp_rnsince', run.start - 1); persist(true);
+    }
     redrawYard(); map.track(run.track); map.stops(markList(run));
     startGps(); keepAwake();
   } else {

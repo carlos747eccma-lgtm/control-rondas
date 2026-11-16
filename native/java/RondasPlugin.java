@@ -19,6 +19,11 @@ import com.getcapacitor.annotation.PermissionCallback;
 public class RondasPlugin extends Plugin {
     static RondasPlugin inst;
 
+    static double num(PluginCall call, String k, double d) {
+        Object v = call.getData().opt(k);
+        return v instanceof Number ? ((Number) v).doubleValue() : d;
+    }
+
     @Override
     public void load() { inst = this; }
 
@@ -45,12 +50,12 @@ public class RondasPlugin extends Plugin {
         try {
             Intent i = new Intent(getContext(), GuardService.class);
             i.putExtra("cfg", true);
-            i.putExtra("speedLimit", call.getDouble("speedLimit", 25.0));
-            i.putExtra("stopAlarm", call.getDouble("stopAlarm", 5.0));
-            i.putExtra("stopRad", call.getDouble("stopRad", 8.0));
-            i.putExtra("stopSec", call.getDouble("stopSec", 30.0));
-            i.putExtra("maxAcc", call.getDouble("maxAcc", 25.0));
-            i.putExtra("jumpSpd", call.getDouble("jumpSpd", 90.0));
+            i.putExtra("speedLimit", num(call, "speedLimit", 25.0));
+            i.putExtra("stopAlarm", num(call, "stopAlarm", 5.0));
+            i.putExtra("stopRad", num(call, "stopRad", 8.0));
+            i.putExtra("stopSec", num(call, "stopSec", 30.0));
+            i.putExtra("maxAcc", num(call, "maxAcc", 25.0));
+            i.putExtra("jumpSpd", num(call, "jumpSpd", 90.0));
             ContextCompat.startForegroundService(getContext(), i);
             call.resolve();
         } catch (Exception e) {
@@ -68,7 +73,7 @@ public class RondasPlugin extends Plugin {
 
     @PluginMethod
     public void drain(PluginCall call) {
-        long since = (long) (double) call.getDouble("since", 0.0);
+        long since = (long) num(call, "since", 0); // ojo: getDouble devuelve el valor por defecto con números enteros grandes (Long)
         java.util.List<double[]> l = GuardService.since(getContext(), since);
         com.getcapacitor.JSArray a = new com.getcapacitor.JSArray();
         try {
