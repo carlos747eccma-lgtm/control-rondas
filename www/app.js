@@ -117,13 +117,13 @@ function cpHtml(e) {
 }
 
 /* Pinta en rojo el patio y "borra" el rojo a lo largo del recorrido (ancho = distancia de visión) */
-function drawCoverage(ctx, toPx, w, h) {
+function drawCoverage(ctx, toPx, w, h, trackArg) {
   ctx.clearRect(0, 0, w, h);
   if (yard.boundary.length < 3) return;
   ctx.globalCompositeOperation = 'source-over';
   ctx.fillStyle = 'rgba(239,68,68,0.42)'; ctx.strokeStyle = 'rgba(239,68,68,0.9)'; ctx.lineWidth = 1.5;
   ctx.beginPath(); yard.boundary.forEach((p, i) => { const q = toPx(p); i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y); }); ctx.closePath(); ctx.fill();
-  const tr = run && run.track;
+  const tr = trackArg || (run && run.track);
   if (!tr || !tr.length) return;
   const a = toPx(tr[0]), b = toPx({ lat: tr[0].lat + cfg.covRad / 110540, lng: tr[0].lng }), r = Math.max(1, Math.abs(a.y - b.y));
   ctx.globalCompositeOperation = 'destination-out';
@@ -761,6 +761,57 @@ function report(r) {
   setTimeout(() => window.print(), 50);
 }
 
+/* ---------- Mapa para el informe (satélite + recorrido + paradas + velocidad) ---------- */
+function loadTile(url) {
+  return new Promise(res => { const im = new Image(); im.crossOrigin = 'anonymous'; const to = setTimeout(() => res(null), 8000); im.onload = () => { clearTimeout(to); res(im); }; im.onerror = () => { clearTimeout(to); res(null); }; im.src = url; });
+}
+async function reportMap(r, W, H) {
+  const pts = [].concat(yard.boundary, r.track || [], r.stops || [], r.speeding || []);
+  if (!pts.length) return null;
+  const lat2y = (lat, z) => { const s = Math.sin(lat * Math.PI / 180); return (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * 256 * Math.pow(2, z); };
+  const lng2x = (lng, z) => (lng + 180) / 360 * 256 * Math.pow(2, z);
+  const minLat = Math.min(...pts.map(p => p.lat)), maxLat = Math.max(...pts.map(p => p.lat)), minLng = Math.min(...pts.map(p => p.lng)), maxLng = Math.max(...pts.map(p => p.lng));
+  let z = 19;
+  while (z > 3 && (lng2x(maxLng, z) - lng2x(minLng, z) > W * 0.86 || lat2y(minLat, z) - lat2y(maxLat, z) > H * 0.86)) z--;
+  // ampliación fina (entre 1x y 2x) para que la zona llene el mapa
+  const spanX = Math.max(1, lng2x(maxLng, z) - lng2x(minLng, z)), spanY = Math.max(1, lat2y(minLat, z) - lat2y(maxLat, z));
+  const sc = Math.max(1, Math.min(2, W * 0.88 / spanX, H * 0.88 / spanY)), w0 = Math.ceil(W / sc), h0 = Math.ceil(H / sc);
+  const cx = (lng2x(minLng, z) + lng2x(maxLng, z)) / 2, cy = (lat2y(minLat, z) + lat2y(maxLat, z)) / 2, ox = cx - w0 / 2, oy = cy - h0 / 2;
+  const toP0 = p => ({ x: lng2x(p.lng, z) - ox, y: lat2y(p.lat, z) - oy });
+  const toPx = p => { const q = toP0(p); return { x: q.x * sc, y: q.y * sc }; };
+  const base = document.createElement('canvas'); base.width = w0; base.height = h0; const bx = base.getContext('2d');
+  bx.fillStyle = '#1e293b'; bx.fillRect(0, 0, w0, h0);
+  // teselas de satélite (Esri World Imagery)
+  const t0x = Math.floor(ox / 256), t1x = Math.floor((ox + w0) / 256), t0y = Math.floor(oy / 256), t1y = Math.floor((oy + h0) / 256), jobs = [];
+  for (let tx = t0x; tx <= t1x; tx++) for (let ty = t0y; ty <= t1y; ty++)
+    jobs.push(loadTile('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/' + z + '/' + ty + '/' + tx).then(im => { if (im) bx.drawImage(im, tx * 256 - ox, ty * 256 - oy); }));
+  await Promise.all(jobs);
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H; const ctx = cv.getContext('2d');
+  ctx.imageSmoothingQuality = 'high'; ctx.drawImage(base, 0, 0, w0 * sc, h0 * sc);
+  // zona sin vigilar en rojo
+  const cov = document.createElement('canvas'); cov.width = W; cov.height = H;
+  drawCoverage(cov.getContext('2d'), toPx, W, H, r.track || []); ctx.drawImage(cov, 0, 0);
+  // límite
+  if (yard.boundary.length >= 3) { ctx.setLineDash([10, 6]); ctx.strokeStyle = '#fff'; ctx.lineWidth = 2.5; ctx.beginPath(); yard.boundary.forEach((p, i) => { const q = toPx(p); i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y); }); ctx.closePath(); ctx.stroke(); ctx.setLineDash([]); }
+  // recorrido
+  ctx.strokeStyle = '#3b82f6'; ctx.lineWidth = 4; ctx.lineJoin = ctx.lineCap = 'round'; ctx.beginPath(); let prev = null;
+  (r.track || []).forEach(p => { const q = toPx(p); if (prev && p.t - prev.t < 90000) ctx.lineTo(q.x, q.y); else ctx.moveTo(q.x, q.y); prev = p; });
+  ctx.stroke();
+  const label = (q, txt, bg) => { ctx.font = 'bold 22px system-ui,sans-serif'; const w = ctx.measureText(txt).width + 14; ctx.fillStyle = bg; ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.beginPath(); ctx.roundRect ? ctx.roundRect(q.x - w / 2, q.y - 17, w, 34, 8) : ctx.rect(q.x - w / 2, q.y - 17, w, 34); ctx.fill(); ctx.stroke(); ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(txt, q.x, q.y + 1); };
+  const dot = (q, rad, fill, txt) => { ctx.beginPath(); ctx.arc(q.x, q.y, rad, 0, Math.PI * 2); ctx.fillStyle = fill; ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = '#fff'; ctx.stroke(); ctx.fillStyle = '#000'; ctx.font = 'bold ' + Math.round(rad * 1.1) + 'px system-ui,sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(txt, q.x, q.y + 1); };
+  (r.gaps || []).forEach((g, k) => { if (g.lat != null) label(toPx(g), 'C' + (k + 1) + ' sin señal', '#7c3aed'); });
+  (r.stops || []).forEach((s, k) => dot(toPx(s), 15 + Math.min(10, s.dur / 60000), cfg.stopAlarm && s.dur >= cfg.stopAlarm * 60000 ? '#ef4444' : '#f59e0b', String(k + 1)));
+  (r.speeding || []).forEach((o, k) => label(toPx(o), 'V' + (k + 1) + ' ' + o.max + ' km/h', '#dc2626'));
+  // leyenda
+  const items = [['#ef4444', 'Sin vigilar'], ['#3b82f6', 'Recorrido'], ['#f59e0b', 'Parada (nº)'], ['#dc2626', 'V = exceso velocidad'], ['#7c3aed', 'C = corte de señal']];
+  ctx.font = '600 19px system-ui,sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  const lw = Math.max(...items.map(i => ctx.measureText(i[1]).width)) + 48;
+  ctx.fillStyle = 'rgba(15,23,42,.85)'; ctx.fillRect(12, H - 12 - items.length * 30 - 12, lw, items.length * 30 + 12);
+  items.forEach(([c, t], i) => { const y = H - 12 - items.length * 30 + i * 30 + 9; ctx.fillStyle = c; ctx.fillRect(24, y - 8, 16, 16); ctx.fillStyle = '#fff'; ctx.fillText(t, 48, y); });
+  ctx.fillStyle = 'rgba(255,255,255,.8)'; ctx.font = '14px system-ui,sans-serif'; ctx.textAlign = 'right'; ctx.fillText('Imágenes © Esri', W - 10, H - 10);
+  try { return cv.toDataURL('image/jpeg', 0.85); } catch (e) { return null; } // si las teselas no permiten exportar
+}
+
 /* ---------- Compartir PDF / Excel ---------- */
 function loadScript(src) { return new Promise((res, rej) => { if (document.querySelector('script[src="' + src + '"]')) return res(); const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = () => rej(new Error('No se pudo cargar ' + src)); document.head.appendChild(s); }); }
 function blobToB64(blob) { return new Promise(res => { const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(',')[1]); fr.readAsDataURL(blob); }); }
@@ -804,6 +855,12 @@ async function sharePdf(r) {
   const kp = [S.exp != null ? ['Rondas', r.rounds.length + ' / ' + S.exp] : ['Cortes de señal', String(gaps)], S.comp != null ? ['Cumplimiento', S.comp + '%'] : ['Paradas largas', String(S.longStops.length)], ['Patio vigilado', (S.cov ?? '–') + '%'], ['Tiempo parado', fmtDur(stoppedMs(r))], ['Recorrido', fmtDist(r.dist)], ['Duración', fmtDur(elapsed(r))], ['Paradas', String(r.stops.length)], ['Sin señal GPS', fmtDur(gapMs(r))]];
   kp.forEach(([k, v], i) => { const x = 14 + (i % 4) * 46, y = 45 + Math.floor(i / 4) * 15; doc.setDrawColor(200); doc.roundedRect(x, y, 44, 13, 1.5, 1.5); doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.text(k, x + 2.5, y + 4.5); doc.setFont('helvetica', 'bold'); doc.setFontSize(12); doc.text(v, x + 2.5, y + 10.5); });
   let y = 80;
+  const img = await reportMap(r, 1400, 930);
+  if (img) {
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.text('Mapa del turno', 14, y);
+    doc.addImage(img, 'JPEG', 14, y + 2, 182, 121); doc.setDrawColor(150); doc.rect(14, y + 2, 182, 121);
+    y += 130;
+  }
   const tbl = (title, head, body, colorCol) => {
     if (y > 250) { doc.addPage(); y = 18; }
     doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.text(title, 14, y);
@@ -814,6 +871,8 @@ async function sharePdf(r) {
   const row = (arr, c) => { arr._c = c; return arr; };
   if (runPoints(r).length) tbl('Control de paso por puntos', ['Punto', 'Pasos', 'Último paso', 'Mayor tiempo sin pasar'], runPoints(r).map(c => { const g = maxGap(c, r), last = r.lastPass[c.id]; return row([c.name + (c.type === 'salida' ? ' (salida)' : ''), String(r.passes.filter(p => p.id === c.id).length), last ? fmtTime(last) : 'nunca', fmtMin(g)], g > due ? RED : GRN); }), 3);
   tbl('Incidencias', ['Hora', 'Detalle'], r.events.filter(e => e.k === 'bad' || e.k === 'warn').map(e => row([fmtTime(e.t), e.txt], e.k === 'bad' ? RED : AMB)), 1);
+  if ((r.speeding || []).length) tbl('Excesos de velocidad', ['Nº', 'Hora', 'Hasta', 'Velocidad máx.', 'Posición'], r.speeding.map((o, k) => row(['V' + (k + 1), fmtTime(o.from), fmtTime(o.to), o.max + ' km/h', o.lat.toFixed(5) + ', ' + o.lng.toFixed(5)], RED)), 3);
+  if ((r.gaps || []).length) tbl('Cortes de señal GPS', ['Nº', 'Desde', 'Hasta', 'Duración', 'Última posición'], r.gaps.map((g, k) => row(['C' + (k + 1), fmtTime(g.from), fmtTime(g.to), fmtMin(g.dur), g.lat != null ? g.lat.toFixed(5) + ', ' + g.lng.toFixed(5) : '—'], RED)), 3);
   tbl('Paradas', ['Nº', 'Desde', 'Hasta', 'Duración', 'Posición'], r.stops.map((s, k) => row([String(k + 1), fmtTime(s.from), fmtTime(s.to), fmtMin(s.dur), s.lat.toFixed(5) + ', ' + s.lng.toFixed(5)], cfg.stopAlarm && s.dur >= cfg.stopAlarm * 60000 ? RED : null)), 3);
   if (runPoints(r).length) tbl('Rondas completas', ['Nº', 'Inicio', 'Fin', 'Duración'], r.rounds.map(x => [String(x.n), fmtTime(x.start), fmtTime(x.end), fmtMin(x.dur)]));
   if (y > 262) { doc.addPage(); y = 20; }
