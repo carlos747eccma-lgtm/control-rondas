@@ -302,7 +302,7 @@ function newRun() {
   return { id: Date.now(), guard: $('guard').value.trim() || LS.get('rp_guard', ''), start: Date.now(), end: null, paused: false, pausedMs: 0, pauseAt: null,
     track: [], dist: 0, maxSpeed: 0, speed: 0, stops: [], events: [], covered: {}, rejected: 0, fixes: 0,
     noSignalMs: 0, outside: false, anchor: null, inStop: false, alarmed: false, last: null, lastAcceptT: null,
-    passes: [], lastPass: {}, rounds: [], roundStart: null, roundVisited: {}, near: {}, overdue: {} };
+    passes: [], lastPass: {}, rounds: [], roundStart: null, roundVisited: {}, near: {}, overdue: {}, gaps: [] };
 }
 let kf = Kalman(3);
 function nextShift(t) {
@@ -325,7 +325,10 @@ function startRun(sim) {
 function finishRun() {
   const t = nowT();
   if (run.paused) { run.pausedMs += t - run.pauseAt; run.paused = false; }
-  closeStop(t); run.end = t;
+  closeStop(t);
+  if (run.lastAcceptT && t - run.lastAcceptT > GAP_MS) logGap(run.lastAcceptT, t);
+  else if (!run.lastAcceptT && !run.sim && t - run.start > GAP_MS) logGap(run.start, t);
+  run.end = t;
   run.coverage = covPct(); run.cellsTotal = cells.length;
   run.points = yard.points.map(c => ({ id: c.id, name: c.name, type: c.type }));
   run.expected = expectedRounds(run); run.compliance = compliance(run);
@@ -350,6 +353,7 @@ function cpStatus(cp, r) {
   if (s >= due * 0.8) return { k: 'warn', txt: 'Toca pasar', since: s, left: due - s };
   return { k: 'ok', txt: 'Al día', since: s, left: due - s };
 }
+function gapMs(r) { return (r.gaps || []).reduce((a, g) => a + g.dur, 0); }
 function maxGap(cp, r) {
   const ts = r.passes.filter(p => p.id === cp.id).map(p => p.t), end = r.end || nowT();
   const all = [r.start, ...ts, end]; let g = 0;
@@ -374,6 +378,8 @@ function onFix(raw) {
     if (dt > 0 && d > Math.max(acc, 5) && d / dt * 3.6 > cfg.maxSpd) { run.rejected++; return; }
     if (dt > 20) run.noSignalMs += (dt - 20) * 1000;
   }
+  // Hueco sin señal válida (app cerrada, móvil apagado o dentro de un contenedor)
+  if (run.lastAcceptT && t - run.lastAcceptT > GAP_MS) logGap(run.lastAcceptT, t);
   // 3) Suavizado
   const p = kf.step(raw, acc, t); p.t = t; p.acc = acc;
   map.me(p, acc);
@@ -407,6 +413,13 @@ function onFix(raw) {
   }
   run.last = { lat: p.lat, lng: p.lng }; run.lastAcceptT = t;
   renderAll(); persist();
+}
+const GAP_MS = 2 * 60000;
+function logGap(from, to) {
+  const g = { from, to, dur: to - from, lat: run.last && run.last.lat, lng: run.last && run.last.lng };
+  run.gaps = run.gaps || []; run.gaps.push(g);
+  run.events.push({ t: to, txt: 'Sin señal GPS ' + fmtMin(g.dur) + ' (de ' + fmtHM(from) + ' a ' + fmtHM(to) + '): app cerrada, móvil apagado o sin cobertura', k: 'bad', lat: g.lat, lng: g.lng });
+  renderEvents();
 }
 function checkPoints(p, t, acc) {
   if (!yard.points.length) return;
@@ -604,7 +617,7 @@ function renderInfo() {
     ['Paradas', r.stops.length + ' · ' + fmtDur(stoppedMs(r))],
     ['Patio vigilado', (covPct() ?? '–') + '%'],
     ['Posiciones GPS descartadas', r.rejected + ' de ' + r.fixes],
-    ['Tiempo sin señal válida', fmtDur(r.noSignalMs)]
+    ['Tiempo sin señal válida', fmtDur(gapMs(r)) + ((r.gaps || []).length ? ' (' + r.gaps.length + ' cortes)' : '')]
   ];
   $('runInfo').innerHTML = rows.map(([a, b]) => '<div>' + a + '</div><div>' + esc(b) + '</div>').join('');
 }
@@ -618,8 +631,8 @@ function renderHist() {
     const c = r.compliance, cls = c == null ? 'idle' : c >= 100 ? 'ok' : c >= 60 ? 'warn' : 'bad';
     return '<div class="card hist"><div class="score ' + cls + '" style="background:var(--' + (cls === 'idle' ? 'idle' : cls) + '-bg);color:var(--' + (cls === 'idle' ? 'mut' : cls) + ')">' + (c == null ? '–' : c + '%') + '</div>' +
       '<div class="grow"><b>' + fmtDate(r.start) + ' – ' + fmtHM(r.end) + '</b>' + (r.sim ? ' <span class="pill idle">prueba</span>' : '') +
-      '<div class="mut">' + (r.guard ? esc(r.guard) + ' · ' : '') + r.rounds.length + '/' + (r.expected ?? '–') + ' rondas · ' + fmtDist(r.dist) + ' · ' + r.stops.length + ' paradas · ' + (r.coverage ?? '–') + '% patio</div>' +
-      '<div class="row" style="margin:6px 0 0"><button class="btn sm" data-view="' + k + '">Ver en mapa</button><button class="btn sm" data-rep="' + k + '">Informe</button><button class="btn sm" data-csv="' + k + '">Excel</button><button class="btn sm" data-gpx="' + k + '">GPX</button></div></div></div>';
+      '<div class="mut">' + (r.guard ? esc(r.guard) + ' · ' : '') + r.rounds.length + '/' + (r.expected ?? '–') + ' rondas · ' + fmtDist(r.dist) + ' · ' + r.stops.length + ' paradas · ' + (r.coverage ?? '–') + '% patio' + ((r.gaps || []).length ? ' · <span style="color:var(--bad)">' + r.gaps.length + ' cortes de señal</span>' : '') + '</div>' +
+      '<div class="row" style="margin:6px 0 0"><button class="btn sm" data-view="' + k + '">Ver en mapa</button><button class="btn sm pri" data-pdf="' + k + '">Enviar PDF</button><button class="btn sm pri" data-xls="' + k + '">Enviar Excel</button></div></div></div>';
   }).join('') : '<div class="empty">Aún no hay turnos guardados. Cada turno se guarda solo al cambiar de turno.</div>';
 }
 let viewing = null;
@@ -653,7 +666,7 @@ function report(r) {
     '<h1>Informe de rondas de vigilancia</h1><div>' + esc($('siteName').textContent) + ' · ' + (r.sim ? 'SIMULACIÓN · ' : '') + fmtDate(r.start) + ' – ' + fmtDate(end) + '</div>' +
     '<div>Vigilante: <b>' + esc(r.guard || '—') + '</b> · Paso exigido cada ' + cfg.freqMin + ' min por ' + pts.length + ' puntos</div>' +
     '<div class="kp"><div>Rondas completas<b class="' + cls(comp) + '">' + r.rounds.length + ' / ' + (exp ?? '–') + '</b></div><div>Cumplimiento<b class="' + cls(comp) + '">' + (comp ?? '–') + '%</b></div><div>Patio vigilado<b>' + (cov ?? '–') + '%</b></div><div>Tiempo parado<b>' + fmtDur(stoppedMs(r)) + '</b></div></div>' +
-    '<div class="kp"><div>Recorrido<b>' + fmtDist(r.dist) + '</b></div><div>Duración<b>' + fmtDur(elapsed(r)) + '</b></div><div>Paradas<b>' + r.stops.length + '</b></div><div>Sin señal GPS<b>' + fmtDur(r.noSignalMs) + '</b></div></div>' +
+    '<div class="kp"><div>Recorrido<b>' + fmtDist(r.dist) + '</b></div><div>Duración<b>' + fmtDur(elapsed(r)) + '</b></div><div>Paradas<b>' + r.stops.length + '</b></div><div>Sin señal GPS<b>' + fmtDur(gapMs(r)) + '</b></div></div>' +
     '<h2>Control de paso por puntos</h2><table><tr><th>Punto</th><th>Pasos</th><th>Último paso</th><th>Mayor tiempo sin pasar</th></tr>' + (ptRows || '<tr><td colspan=4>Sin puntos definidos</td></tr>') + '</table>' +
     '<h2>Rondas completas</h2><table><tr><th>Nº</th><th>Inicio</th><th>Fin</th><th>Duración</th></tr>' + (rRows || '<tr><td colspan=4 class="r">Ninguna ronda completa</td></tr>') + '</table>' +
     '<h2>Paradas</h2><table><tr><th>Nº</th><th>Desde</th><th>Hasta</th><th>Duración</th><th>Posición</th></tr>' + (sRows || '<tr><td colspan=5>Sin paradas</td></tr>') + '</table>' +
@@ -662,8 +675,103 @@ function report(r) {
   setTimeout(() => window.print(), 50);
 }
 
+/* ---------- Compartir PDF / Excel ---------- */
+function loadScript(src) { return new Promise((res, rej) => { if (document.querySelector('script[src="' + src + '"]')) return res(); const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = () => rej(new Error('No se pudo cargar ' + src)); document.head.appendChild(s); }); }
+function blobToB64(blob) { return new Promise(res => { const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(',')[1]); fr.readAsDataURL(blob); }); }
+async function shareFile(name, blob, title) {
+  const Cap = window.Capacitor;
+  try {
+    if (Cap && Cap.isNativePlatform && Cap.isNativePlatform() && Cap.Plugins.Filesystem && Cap.Plugins.Share) {
+      const w = await Cap.Plugins.Filesystem.writeFile({ path: name, data: await blobToB64(blob), directory: 'CACHE' });
+      await Cap.Plugins.Share.share({ title, text: title, files: [w.uri], dialogTitle: 'Enviar ' + name });
+      return;
+    }
+    const f = new File([blob], name, { type: blob.type });
+    if (navigator.canShare && navigator.canShare({ files: [f] })) { await navigator.share({ files: [f], title }); return; }
+  } catch (e) { if (e && (e.name === 'AbortError' || /cancel/i.test(e.message || ''))) return; console.warn(e); }
+  download(name, blob);
+}
+const mapsUrl = (lat, lng) => lat != null ? 'https://maps.google.com/?q=' + (+lat).toFixed(6) + ',' + (+lng).toFixed(6) : '';
+function runPoints(r) { return r.end && r.points ? r.points : yard.points; }
+function runSummary(r) {
+  const exp = r.end ? r.expected : expectedRounds(r), comp = r.end ? r.compliance : compliance(r);
+  const longStops = r.stops.filter(s => cfg.stopAlarm && s.dur >= cfg.stopAlarm * 60000);
+  return { exp, comp, cov: r.end ? r.coverage : covPct(), longStops, late: runPoints(r).filter(c => maxGap(c, r) > cfg.freqMin * 60000) };
+}
+async function sharePdf(r) {
+  banner('Preparando PDF…', '', 2000);
+  await loadScript('vendor/jspdf.umd.min.js'); await loadScript('vendor/jspdf.plugin.autotable.min.js');
+  const { jsPDF } = window.jspdf, doc = new jsPDF({ unit: 'mm', format: 'a4' }), S = runSummary(r), due = cfg.freqMin * 60000, end = r.end || nowT();
+  const RED = [185, 28, 28], GRN = [21, 128, 61], AMB = [180, 83, 9];
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.text('Informe de rondas de vigilancia', 14, 16);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5);
+  doc.text($('siteName').textContent + (r.sim ? '  ·  SIMULACIÓN' : '') + '  ·  ' + fmtDate(r.start) + ' – ' + fmtDate(end), 14, 22);
+  doc.text('Vigilante: ' + (r.guard || '—') + '  ·  Paso exigido cada ' + cfg.freqMin + ' min por ' + runPoints(r).length + ' puntos', 14, 27);
+  const gaps = (r.gaps || []).length;
+  const ok = S.comp != null && S.comp >= 100 && !S.longStops.length && !gaps;
+  doc.setFillColor(...(ok ? [220, 252, 231] : [254, 226, 226])); doc.roundedRect(14, 31, 182, 10, 2, 2, 'F');
+  doc.setFont('helvetica', 'bold'); doc.setTextColor(...(ok ? GRN : RED));
+  doc.text(ok ? 'TURNO CORRECTO: rondas completas, sin paradas largas ni cortes de señal' : 'REVISAR: ' + [S.comp != null && S.comp < 100 ? 'faltan rondas' : '', S.longStops.length ? S.longStops.length + ' paradas largas' : '', gaps ? gaps + ' cortes de señal' : '', S.late.length ? S.late.length + ' puntos con retraso' : ''].filter(Boolean).join(' · '), 17, 37.5);
+  doc.setTextColor(0);
+  const kp = [['Rondas', r.rounds.length + ' / ' + (S.exp ?? '–')], ['Cumplimiento', (S.comp ?? '–') + '%'], ['Patio vigilado', (S.cov ?? '–') + '%'], ['Tiempo parado', fmtDur(stoppedMs(r))], ['Recorrido', fmtDist(r.dist)], ['Duración', fmtDur(elapsed(r))], ['Paradas', String(r.stops.length)], ['Sin señal GPS', fmtDur(gapMs(r))]];
+  kp.forEach(([k, v], i) => { const x = 14 + (i % 4) * 46, y = 45 + Math.floor(i / 4) * 15; doc.setDrawColor(200); doc.roundedRect(x, y, 44, 13, 1.5, 1.5); doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.text(k, x + 2.5, y + 4.5); doc.setFont('helvetica', 'bold'); doc.setFontSize(12); doc.text(v, x + 2.5, y + 10.5); });
+  let y = 80;
+  const tbl = (title, head, body, colorCol) => {
+    if (y > 250) { doc.addPage(); y = 18; }
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.text(title, 14, y);
+    doc.autoTable({ startY: y + 2, head: [head], body: body.length ? body : [[{ content: 'Sin datos', colSpan: head.length }]], theme: 'striped', styles: { fontSize: 8.5, cellPadding: 1.6 }, headStyles: { fillColor: [30, 41, 59] }, margin: { left: 14, right: 14 },
+      didParseCell: d => { if (d.section === 'body' && colorCol != null && d.row.raw && d.row.raw._c && d.column.index === colorCol) { d.cell.styles.textColor = d.row.raw._c; d.cell.styles.fontStyle = 'bold'; } } });
+    y = doc.lastAutoTable.finalY + 8;
+  };
+  const row = (arr, c) => { arr._c = c; return arr; };
+  tbl('Control de paso por puntos', ['Punto', 'Pasos', 'Último paso', 'Mayor tiempo sin pasar'], runPoints(r).map(c => { const g = maxGap(c, r), last = r.lastPass[c.id]; return row([c.name + (c.type === 'salida' ? ' (salida)' : ''), String(r.passes.filter(p => p.id === c.id).length), last ? fmtTime(last) : 'nunca', fmtMin(g)], g > due ? RED : GRN); }), 3);
+  tbl('Incidencias', ['Hora', 'Detalle'], r.events.filter(e => e.k === 'bad' || e.k === 'warn').map(e => row([fmtTime(e.t), e.txt], e.k === 'bad' ? RED : AMB)), 1);
+  tbl('Paradas', ['Nº', 'Desde', 'Hasta', 'Duración', 'Posición'], r.stops.map((s, k) => row([String(k + 1), fmtTime(s.from), fmtTime(s.to), fmtMin(s.dur), s.lat.toFixed(5) + ', ' + s.lng.toFixed(5)], cfg.stopAlarm && s.dur >= cfg.stopAlarm * 60000 ? RED : null)), 3);
+  tbl('Rondas completas', ['Nº', 'Inicio', 'Fin', 'Duración'], r.rounds.map(x => [String(x.n), fmtTime(x.start), fmtTime(x.end), fmtMin(x.dur)]));
+  if (y > 262) { doc.addPage(); y = 20; }
+  doc.setDrawColor(0); doc.line(14, y + 16, 90, y + 16); doc.line(120, y + 16, 196, y + 16); doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.text('Firma del vigilante', 14, y + 21); doc.text('Firma del supervisor', 120, y + 21);
+  const n = doc.getNumberOfPages(); for (let i = 1; i <= n; i++) { doc.setPage(i); doc.setFontSize(7.5); doc.setTextColor(120); doc.text('Control de Rondas · generado ' + fmtDate(Date.now()) + ' · página ' + i + ' de ' + n, 14, 290); }
+  await shareFile('informe-turno-' + stamp(r.start) + '.pdf', doc.output('blob'), 'Informe de rondas ' + fmtDate(r.start));
+}
+function sheet(rows, widths) {
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  if (widths) ws['!cols'] = widths.map(w => ({ wch: w }));
+  if (rows.length > 1) ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: rows.length - 1, c: rows[0].length - 1 } }) };
+  return ws;
+}
+const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+async function shareXlsx(r) {
+  banner('Preparando Excel…', '', 2000);
+  await loadScript('vendor/xlsx.mini.min.js');
+  const S = runSummary(r), due = cfg.freqMin * 60000, end = r.end || nowT(), wb = XLSX.utils.book_new(), mins = ms => Math.round(ms / 6000) / 10;
+  XLSX.utils.book_append_sheet(wb, sheet([
+    ['Concepto', 'Valor'], ['Instalación', $('siteName').textContent], ['Vigilante', r.guard || ''], ['Inicio', fmtDate(r.start)], ['Fin', fmtDate(end)], ['Simulación', r.sim ? 'Sí' : 'No'],
+    ['Rondas completas', r.rounds.length], ['Rondas exigidas', S.exp ?? ''], ['Cumplimiento %', S.comp ?? ''], ['Paso exigido cada (min)', cfg.freqMin],
+    ['Puntos con retraso', S.late.map(c => c.name).join(', ')], ['Patio vigilado %', S.cov ?? ''], ['Recorrido (m)', Math.round(r.dist)], ['Duración (min)', mins(elapsed(r))],
+    ['Paradas', r.stops.length], ['Tiempo parado (min)', mins(stoppedMs(r))], ['Paradas largas (> ' + cfg.stopAlarm + ' min)', S.longStops.length], ['Cortes de señal', (r.gaps || []).length], ['Tiempo sin señal (min)', mins(gapMs(r))]
+  ], [28, 40]), 'Resumen');
+  XLSX.utils.book_append_sheet(wb, sheet([['Punto', 'Tipo', 'Pasos', 'Último paso', 'Mayor tiempo sin pasar (min)', 'Estado'], ...runPoints(r).map(c => { const g = maxGap(c, r); return [c.name, c.type === 'salida' ? 'Salida' : 'Punto', r.passes.filter(p => p.id === c.id).length, r.lastPass[c.id] ? fmtTime(r.lastPass[c.id]) : 'nunca', mins(g), g > due ? 'RETRASO' : 'OK']; })], [22, 8, 7, 12, 26, 10]), 'Puntos');
+  XLSX.utils.book_append_sheet(wb, sheet([['Hora', 'Gravedad', 'Detalle', 'Mapa'], ...r.events.filter(e => e.k === 'bad' || e.k === 'warn').map(e => [fmtTime(e.t), e.k === 'bad' ? 'Alta' : 'Media', e.txt, mapsUrl(e.lat, e.lng)])], [10, 9, 60, 45]), 'Incidencias');
+  XLSX.utils.book_append_sheet(wb, sheet([['Nº', 'Desde', 'Hasta', 'Duración (min)', 'Larga', 'Mapa'], ...r.stops.map((s, k) => [k + 1, fmtTime(s.from), fmtTime(s.to), mins(s.dur), cfg.stopAlarm && s.dur >= cfg.stopAlarm * 60000 ? 'SÍ' : '', mapsUrl(s.lat, s.lng)])], [5, 10, 10, 14, 7, 45]), 'Paradas');
+  XLSX.utils.book_append_sheet(wb, sheet([['Hora', 'Punto', 'Mapa'], ...r.passes.map(p => [fmtTime(p.t), p.name, mapsUrl(p.lat, p.lng)])], [10, 22, 45]), 'Pasos');
+  XLSX.utils.book_append_sheet(wb, sheet([['Nº', 'Inicio', 'Fin', 'Duración (min)'], ...r.rounds.map(x => [x.n, fmtTime(x.start), fmtTime(x.end), mins(x.dur)])], [5, 10, 10, 14]), 'Rondas');
+  const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+  await shareFile('turno-' + stamp(r.start) + '.xlsx', new Blob([out], { type: XLSX_TYPE }), 'Turno ' + fmtDate(r.start));
+}
+async function shareAllXlsx() {
+  const h = LS.get('rp_hist', []).filter(r => !r.sim);
+  if (!h.length) { banner('Aún no hay turnos reales guardados.', 'warn', 3000); return; }
+  await loadScript('vendor/xlsx.mini.min.js');
+  const mins = ms => Math.round(ms / 6000) / 10, wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, sheet([['Inicio', 'Fin', 'Vigilante', 'Rondas', 'Exigidas', 'Cumplimiento %', 'Paradas', 'Paradas largas', 'Tiempo parado (min)', 'Cortes de señal', 'Sin señal (min)', 'Patio %', 'Recorrido (m)', 'Revisar'],
+    ...h.map(r => { const longS = r.stops.filter(s => cfg.stopAlarm && s.dur >= cfg.stopAlarm * 60000).length, gaps = (r.gaps || []).length; return [fmtDate(r.start), fmtDate(r.end), r.guard || '', r.rounds.length, r.expected ?? '', r.compliance ?? '', r.stops.length, longS, mins(stoppedMs(r)), gaps, mins(gapMs(r)), r.coverage ?? '', Math.round(r.dist), (r.compliance != null && r.compliance < 100) || longS || gaps ? 'SÍ' : '']; })],
+    [17, 17, 16, 8, 9, 14, 8, 13, 18, 14, 14, 8, 13, 8]), 'Turnos');
+  const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+  await shareFile('resumen-turnos-' + stamp(Date.now()) + '.xlsx', new Blob([out], { type: XLSX_TYPE }), 'Resumen de turnos');
+}
+
 /* ---------- Exportar ---------- */
-function download(name, text, type) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500); }
+function download(name, text, type) { const a = document.createElement('a'); a.href = URL.createObjectURL(text instanceof Blob ? text : new Blob([text], { type })); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500); }
 function stamp(t) { return new Date(t).toISOString().slice(0, 16).replace(/[:T]/g, '-'); }
 function toGpx(r) {
   const pts = r.track.map(p => '<trkpt lat="' + p.lat + '" lon="' + p.lng + '"><time>' + new Date(p.t).toISOString() + '</time></trkpt>').join('\n');
@@ -715,13 +823,15 @@ function bind() {
     banner('Configuración guardada', '', 2000);
   };
   $('evList').onclick = e => { const li = e.target.closest('[data-go]'); if (li) { const [lat, lng] = li.dataset.go.split(',').map(Number); map.center({ lat, lng }, 19); } };
-  $('bReportNow').onclick = () => report(viewing ? viewing.live : run);
+  const cur = () => viewing ? viewing.live : run;
+  $('bReportNow').onclick = () => sharePdf(cur()).catch(err => banner('No se pudo crear el PDF: ' + err.message, 'bad', 5000));
+  $('bXlsNow').onclick = () => shareXlsx(cur()).catch(err => banner('No se pudo crear el Excel: ' + err.message, 'bad', 5000));
+  $('bXlsAll').onclick = () => shareAllXlsx().catch(err => banner('No se pudo crear el Excel: ' + err.message, 'bad', 5000));
   $('histList').onclick = e => {
     const h = LS.get('rp_hist', []), d = e.target.dataset;
     if (d.view != null) viewRun(h[+d.view]);
-    if (d.rep != null) report(h[+d.rep]);
-    if (d.gpx != null) { const r = h[+d.gpx]; download('turno-' + stamp(r.start) + '.gpx', toGpx(r), 'application/gpx+xml'); }
-    if (d.csv != null) { const r = h[+d.csv]; download('turno-' + stamp(r.start) + '.csv', toCsv(r), 'text/csv'); }
+    if (d.pdf != null) sharePdf(h[+d.pdf]).catch(err => banner('No se pudo crear el PDF: ' + err.message, 'bad', 5000));
+    if (d.xls != null) shareXlsx(h[+d.xls]).catch(err => banner('No se pudo crear el Excel: ' + err.message, 'bad', 5000));
   };
 }
 function fillCfg() { Object.keys(DEF_CFG).forEach(k => { if ($(k)) $(k).value = cfg[k]; }); }

@@ -171,7 +171,10 @@ input,select{width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(
       <ul class="tl" id="evList"></ul>
     </div>
     <div id="pTurnos" class="pane">
-      <div class="row"><button class="btn pri grow" id="bReportNow">Informe del turno actual (PDF)</button></div>
+      <h3>Turno actual</h3>
+      <div class="row"><button class="btn pri grow" id="bReportNow">Enviar PDF</button><button class="btn pri grow" id="bXlsNow">Enviar Excel</button></div>
+      <div class="row"><button class="btn grow" id="bXlsAll">Excel resumen de todos los turnos</button></div>
+      <p class="mut">Se abre el menú del móvil para mandarlo por WhatsApp, correo, etc. El PDF lleva un aviso en rojo si hay rondas sin hacer, paradas largas o cortes de señal.</p>
       <h3>Turnos anteriores</h3>
       <div id="histList"></div>
     </div>
