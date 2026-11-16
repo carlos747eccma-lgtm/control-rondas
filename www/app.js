@@ -175,7 +175,7 @@ function LeafletAdapter() {
 }
 
 function GoogleAdapter(key) {
-  let m, boundary, track, me, meAcc, stopsArr = [], exitsArr = [], draftArr = [], ov, covT = 0;
+  let m, boundary, track, me, meAcc, stopsList = [], draftArr = [], ov, ptsOv, ptsList = [], covT = 0;
   function cov() { if (!covT) covT = setTimeout(() => { covT = 0; ov && ov.draw(); }, 300); }
   const LL = p => ({ lat: p.lat, lng: p.lng });
   return {
@@ -198,6 +198,14 @@ function GoogleAdapter(key) {
             drawCoverage(c.getContext('2d'), p => { const q = pr.fromLatLngToDivPixel(new google.maps.LatLng(p.lat, p.lng)); return { x: q.x - x0, y: q.y - y0 }; }, W, H);
           };
           ov.setMap(m);
+          // puntos de control como etiquetas HTML (mismo aspecto que sin Google)
+          ptsOv = new google.maps.OverlayView();
+          ptsOv.onAdd = function () { this.d = document.createElement('div'); this.d.style.cssText = 'position:absolute;left:0;top:0'; this.d.onclick = e => { const el = e.target.closest('[data-pid]'); if (el) { e.stopPropagation(); focusPoint(el.dataset.pid); } }; this.getPanes().overlayMouseTarget.appendChild(this.d); };
+          ptsOv.draw = function () {
+            const pr = this.getProjection(); if (!pr || !this.d) return;
+            this.d.innerHTML = stopsList.map(s => { const q = pr.fromLatLngToDivPixel(new google.maps.LatLng(s.lat, s.lng)), r = 6 + Math.min(10, s.dur / 60000); return '<div title="' + fmtDur(s.dur) + ' parado" style="position:absolute;left:' + (q.x - r) + 'px;top:' + (q.y - r) + 'px;width:' + 2 * r + 'px;height:' + 2 * r + 'px;border-radius:50%;background:#f59e0b;border:1px solid #000;opacity:.95"></div>'; }).join('') + ptsList.map(e => { const q = pr.fromLatLngToDivPixel(new google.maps.LatLng(e.lat, e.lng)); return '<div data-pid="' + e.id + '" style="position:absolute;left:' + q.x + 'px;top:' + q.y + 'px;cursor:pointer">' + cpHtml(e) + '</div>'; }).join('');
+          };
+          ptsOv.setMap(m);
           m.addListener('idle', () => ov.draw());
           res();
         };
@@ -218,14 +226,11 @@ function GoogleAdapter(key) {
       if (!p) { if (me) { me.setMap(null); meAcc.setMap(null); me = meAcc = null; } return; }
       if (!me) {
         meAcc = new google.maps.Circle({ map: m, center: LL(p), radius: acc, strokeColor: COL.blu, strokeWeight: 1, fillColor: COL.blu, fillOpacity: .12, clickable: false });
-        me = new google.maps.Marker({ map: m, position: LL(p), zIndex: 10, icon: { path: google.maps.SymbolPath.CIRCLE, scale: 8, fillColor: COL.blu, fillOpacity: 1, strokeColor: '#fff', strokeWeight: 2 } });
+        me = new google.maps.Marker({ map: m, position: LL(p), zIndex: 10, optimized: false, icon: { path: google.maps.SymbolPath.CIRCLE, scale: 8, fillColor: COL.blu, fillOpacity: 1, strokeColor: '#fff', strokeWeight: 2 } });
       } else { me.setPosition(LL(p)); meAcc.setCenter(LL(p)); meAcc.setRadius(acc); }
     },
-    stops(list) { stopsArr.forEach(x => x.setMap(null)); stopsArr = list.map(s => new google.maps.Marker({ map: m, position: LL(s), title: fmtDur(s.dur) + ' parado', icon: { path: google.maps.SymbolPath.CIRCLE, scale: 6 + Math.min(10, s.dur / 60000), fillColor: COL.amb, fillOpacity: .95, strokeColor: '#000', strokeWeight: 1 } })); },
-    points(list) {
-      exitsArr.forEach(x => x.setMap(null));
-      exitsArr = list.map(e => { const mk = new google.maps.Marker({ map: m, position: LL(e), zIndex: 8, label: { text: e.short, color: '#fff', fontSize: '11px', fontWeight: '700' }, title: e.name, icon: { path: e.type === 'salida' ? 'M -9,-9 9,-9 9,9 -9,9 z' : google.maps.SymbolPath.CIRCLE, scale: e.type === 'salida' ? 1 : 11, fillColor: STC[e.k], fillOpacity: 1, strokeColor: '#fff', strokeWeight: 2 } }); mk.addListener('click', () => focusPoint(e.id)); return mk; });
-    },
+    stops(list) { stopsList = list; if (ptsOv) ptsOv.draw(); },
+    points(list) { ptsList = list; if (ptsOv) ptsOv.draw(); },
     draft(pts) { draftArr.forEach(x => x.setMap(null)); draftArr = []; if (pts.length) { draftArr.push(new google.maps.Polyline({ map: m, path: pts.map(LL), strokeColor: COL.amb, strokeWeight: 3, clickable: false })); pts.forEach(p => draftArr.push(new google.maps.Marker({ map: m, position: LL(p), clickable: false, icon: { path: google.maps.SymbolPath.CIRCLE, scale: 5, fillColor: COL.amb, fillOpacity: 1, strokeWeight: 0 } }))); } }
   };
 }
