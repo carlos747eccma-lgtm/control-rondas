@@ -110,7 +110,9 @@ function Kalman(qMs) {
 /* ---------- Mapas: Leaflet (sin clave) y Google Maps (con clave) ---------- */
 const COL = { red: '#ef4444', grn: '#22c55e', amb: '#f59e0b', blu: '#3b82f6', wht: '#ffffff' };
 const STC = { ok: '#16a34a', warn: '#d97706', bad: '#dc2626', idle: '#475569' };
-function spHtml(o) { return '<div style="transform:translate(-50%,-50%);background:#dc2626;color:#fff;font:700 11px system-ui;padding:2px 6px;border-radius:6px;border:2px solid #fff;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,.5)">⚡ ' + o.max + ' km/h · ' + fmtHM(o.from) + '</div>'; }
+function spSecs(o) { return o.secs != null ? o.secs : Math.max(1, Math.round((o.to - o.from) / 1000) + 1); }
+function fmtSec(n) { n = Math.round(n); return n < 60 ? n + ' s' : Math.floor(n / 60) + ' min ' + String(n % 60).padStart(2, '0') + ' s'; }
+function spHtml(o) { return '<div style="transform:translate(-50%,-50%);background:#dc2626;color:#fff;font:700 11px system-ui;padding:2px 6px;border-radius:6px;border:2px solid #fff;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,.5)">⚡ ' + o.max + ' km/h · ' + spSecs(o) + ' s · ' + fmtHM(o.from) + '</div>'; }
 function cpHtml(e) {
   const r = e.type === 'salida' ? '4px' : '50%';
   return '<div style="transform:translate(-12px,-12px);display:flex;align-items:center;gap:4px;white-space:nowrap"><span style="display:grid;place-items:center;width:24px;height:24px;border-radius:' + r + ';background:' + STC[e.k] + ';border:2px solid #fff;color:#fff;font:700 11px system-ui;box-shadow:0 1px 4px rgba(0,0,0,.5)">' + esc(e.short) + '</span><span style="background:rgba(11,18,32,.85);color:#fff;font:600 11px system-ui;padding:1px 5px;border-radius:4px">' + esc(e.name) + '</span></div>';
@@ -494,17 +496,21 @@ function checkSpeed(spd, p, t, acc) {
   if (!lim) return;
   if (spd > lim && acc <= 20) {
     run.osN = (run.osN || 0) + 1; run.osLow = 0;
-    if (!run.os && run.osN >= 3) { run.os = { from: t, to: t, max: spd, lat: p.lat, lng: p.lng }; SND.speed(); notify([{ id: 9100 + (run.speeding.length % 50), title: '⚠ Más de ' + lim + ' km/h', body: Math.round(spd) + ' km/h a las ' + fmtHM(t) + ': queda registrado' }]); banner('Más de ' + lim + ' km/h: queda registrado', 'bad', 5000); }
+    if (run.osN === 1) run.osPre = { t, max: spd, lat: p.lat, lng: p.lng };
+    else if (run.osPre && spd > run.osPre.max) Object.assign(run.osPre, { max: spd, lat: p.lat, lng: p.lng });
+    if (run.os) run.os.end = null;
+    if (!run.os && run.osN >= 3) { const q = run.osPre || { t, max: spd, lat: p.lat, lng: p.lng }; run.os = { from: q.t, to: t, max: q.max, lat: q.lat, lng: q.lng }; SND.speed(); notify([{ id: 9100 + (run.speeding.length % 50), title: '⚠ Más de ' + lim + ' km/h', body: Math.round(spd) + ' km/h a las ' + fmtHM(t) + ': queda registrado' }]); banner('Más de ' + lim + ' km/h: queda registrado', 'bad', 5000); }
     else if (run.os) { run.os.to = t; if (spd > run.os.max) { run.os.max = spd; run.os.lat = p.lat; run.os.lng = p.lng; } }
   } else {
     run.osN = 0;
+    if (run.os && !run.osLow) run.os.end = t; // primer momento por debajo del límite
     if (run.os && ++run.osLow >= 2) closeSpeed();
   }
 }
 function closeSpeed() {
   const o = run && run.os; if (!o) return;
-  o.max = Math.round(o.max); run.speeding.push(o); run.os = null; run.osLow = 0;
-  run.events.push({ t: o.from, txt: 'Exceso de velocidad: ' + o.max + ' km/h (límite ' + cfg.speedLimit + ') a las ' + fmtHM(o.from) + ', durante ' + fmtMin(Math.max(o.to - o.from, 60000)), k: 'bad', lat: o.lat, lng: o.lng });
+  o.max = Math.round(o.max); o.secs = Math.max(1, Math.round(((o.end || o.to) - o.from) / 1000)); delete o.end; run.speeding.push(o); run.os = null; run.osLow = 0;
+  run.events.push({ t: o.from, txt: 'Exceso de velocidad: ' + o.max + ' km/h (límite ' + cfg.speedLimit + ') a las ' + fmtHM(o.from) + ', durante ' + fmtSec(spSecs(o)), k: 'bad', lat: o.lat, lng: o.lng });
   run.events.sort((a, b) => a.t - b.t);
   map.stops(markList(run)); renderEvents();
 }
@@ -898,7 +904,7 @@ async function reportMap(r, W, H) {
   const dot = (q, rad, fill, txt) => { ctx.beginPath(); ctx.arc(q.x, q.y, rad, 0, Math.PI * 2); ctx.fillStyle = fill; ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = '#fff'; ctx.stroke(); ctx.fillStyle = '#000'; ctx.font = 'bold ' + Math.round(rad * 1.1) + 'px system-ui,sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(txt, q.x, q.y + 1); };
   (r.gaps || []).forEach((g, k) => { if (g.lat != null) label(toPx(g), 'C' + (k + 1) + ' sin señal', '#7c3aed'); });
   (r.stops || []).forEach((s, k) => dot(toPx(s), 15 + Math.min(10, s.dur / 60000), cfg.stopAlarm && s.dur >= cfg.stopAlarm * 60000 ? '#ef4444' : '#f59e0b', String(k + 1)));
-  (r.speeding || []).forEach((o, k) => label(toPx(o), 'V' + (k + 1) + ' ' + o.max + ' km/h', '#dc2626'));
+  (r.speeding || []).forEach((o, k) => label(toPx(o), 'V' + (k + 1) + ' ' + o.max + ' km/h · ' + spSecs(o) + ' s', '#dc2626'));
   // leyenda
   const items = [['#ef4444', 'Sin vigilar'], ['#3b82f6', 'Recorrido'], ['#f59e0b', 'Parada (nº)'], ['#dc2626', 'V = exceso velocidad'], ['#7c3aed', 'C = corte de señal']];
   ctx.font = '600 19px system-ui,sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
@@ -968,7 +974,7 @@ async function sharePdf(r) {
   const row = (arr, c) => { arr._c = c; return arr; };
   if (runPoints(r).length) tbl('Control de paso por puntos', ['Punto', 'Pasos', 'Último paso', 'Mayor tiempo sin pasar'], runPoints(r).map(c => { const g = maxGap(c, r), last = r.lastPass[c.id]; return row([c.name + (c.type === 'salida' ? ' (salida)' : ''), String(r.passes.filter(p => p.id === c.id).length), last ? fmtTime(last) : 'nunca', fmtMin(g)], g > due ? RED : GRN); }), 3);
   tbl('Incidencias', ['Hora', 'Detalle'], r.events.filter(e => e.k === 'bad' || e.k === 'warn').map(e => row([fmtTime(e.t), e.txt], e.k === 'bad' ? RED : AMB)), 1);
-  if ((r.speeding || []).length) tbl('Excesos de velocidad', ['Nº', 'Hora', 'Hasta', 'Velocidad máx.', 'Posición'], r.speeding.map((o, k) => row(['V' + (k + 1), fmtTime(o.from), fmtTime(o.to), o.max + ' km/h', o.lat.toFixed(5) + ', ' + o.lng.toFixed(5)], RED)), 3);
+  if ((r.speeding || []).length) tbl('Excesos de velocidad', ['Nº', 'Hora', 'Duración', 'Velocidad máx.', 'Posición'], r.speeding.map((o, k) => row(['V' + (k + 1), fmtTime(o.from), fmtSec(spSecs(o)), o.max + ' km/h', o.lat.toFixed(5) + ', ' + o.lng.toFixed(5)], RED)), 3);
   if ((r.gaps || []).length) tbl('Cortes de señal GPS', ['Nº', 'Desde', 'Hasta', 'Duración', 'Última posición'], r.gaps.map((g, k) => row(['C' + (k + 1), fmtTime(g.from), fmtTime(g.to), fmtMin(g.dur), g.lat != null ? g.lat.toFixed(5) + ', ' + g.lng.toFixed(5) : '—'], RED)), 3);
   tbl('Paradas', ['Nº', 'Desde', 'Hasta', 'Duración', 'Posición'], r.stops.map((s, k) => row([String(k + 1), fmtTime(s.from), fmtTime(s.to), fmtMin(s.dur), s.lat.toFixed(5) + ', ' + s.lng.toFixed(5)], cfg.stopAlarm && s.dur >= cfg.stopAlarm * 60000 ? RED : null)), 3);
   if (runPoints(r).length) tbl('Rondas completas', ['Nº', 'Inicio', 'Fin', 'Duración'], r.rounds.map(x => [String(x.n), fmtTime(x.start), fmtTime(x.end), fmtMin(x.dur)]));
@@ -992,12 +998,12 @@ async function shareXlsx(r) {
     ['Concepto', 'Valor'], ['Instalación', $('siteName').textContent], ['Vigilante', r.guard || ''], ['Turno', r.shiftLabel || 'automático'], ['Inicio', fmtDate(r.start)], ['Fin', fmtDate(end)], ['Simulación', r.sim ? 'Sí' : 'No'],
     ['Rondas completas', r.rounds.length], ['Rondas exigidas', S.exp ?? ''], ['Cumplimiento %', S.comp ?? ''], ['Paso exigido cada (min)', cfg.freqMin],
     ['Puntos con retraso', S.late.map(c => c.name).join(', ')], ['Patio vigilado %', S.cov ?? ''], ['Recorrido (m)', Math.round(r.dist)], ['Duración (min)', mins(elapsed(r))],
-    ['Paradas', r.stops.length], ['Tiempo parado (min)', mins(stoppedMs(r))], ['Paradas largas (> ' + cfg.stopAlarm + ' min)', S.longStops.length], ['Cortes de señal', (r.gaps || []).length], ['Tiempo sin señal (min)', mins(gapMs(r))], ['Excesos de velocidad (> ' + cfg.speedLimit + ' km/h)', (r.speeding || []).length], ['Velocidad máxima (km/h)', Math.round(r.maxSpeed)]
+    ['Paradas', r.stops.length], ['Tiempo parado (min)', mins(stoppedMs(r))], ['Paradas largas (> ' + cfg.stopAlarm + ' min)', S.longStops.length], ['Cortes de señal', (r.gaps || []).length], ['Tiempo sin señal (min)', mins(gapMs(r))], ['Excesos de velocidad (> ' + cfg.speedLimit + ' km/h)', (r.speeding || []).length], ['Tiempo con exceso (s)', (r.speeding || []).reduce((a, o) => a + spSecs(o), 0)], ['Velocidad máxima (km/h)', Math.round(r.maxSpeed)]
   ], [28, 40]), 'Resumen');
   XLSX.utils.book_append_sheet(wb, sheet([['Punto', 'Tipo', 'Pasos', 'Último paso', 'Mayor tiempo sin pasar (min)', 'Estado'], ...runPoints(r).map(c => { const g = maxGap(c, r); return [c.name, c.type === 'salida' ? 'Salida' : 'Punto', r.passes.filter(p => p.id === c.id).length, r.lastPass[c.id] ? fmtTime(r.lastPass[c.id]) : 'nunca', mins(g), g > due ? 'RETRASO' : 'OK']; })], [22, 8, 7, 12, 26, 10]), 'Puntos');
   XLSX.utils.book_append_sheet(wb, sheet([['Hora', 'Gravedad', 'Detalle', 'Mapa'], ...r.events.filter(e => e.k === 'bad' || e.k === 'warn').map(e => [fmtTime(e.t), e.k === 'bad' ? 'Alta' : 'Media', e.txt, mapsUrl(e.lat, e.lng)])], [10, 9, 60, 45]), 'Incidencias');
   XLSX.utils.book_append_sheet(wb, sheet([['Nº', 'Desde', 'Hasta', 'Duración (min)', 'Larga', 'Mapa'], ...r.stops.map((s, k) => [k + 1, fmtTime(s.from), fmtTime(s.to), mins(s.dur), cfg.stopAlarm && s.dur >= cfg.stopAlarm * 60000 ? 'SÍ' : '', mapsUrl(s.lat, s.lng)])], [5, 10, 10, 14, 7, 45]), 'Paradas');
-  XLSX.utils.book_append_sheet(wb, sheet([['Hora', 'Hasta', 'Velocidad máx. (km/h)', 'Mapa'], ...(r.speeding || []).map(o => [fmtTime(o.from), fmtTime(o.to), o.max, mapsUrl(o.lat, o.lng)])], [10, 10, 20, 45]), 'Velocidad');
+  XLSX.utils.book_append_sheet(wb, sheet([['Hora', 'Duración (s)', 'Velocidad máx. (km/h)', 'Mapa'], ...(r.speeding || []).map(o => [fmtTime(o.from), spSecs(o), o.max, mapsUrl(o.lat, o.lng)])], [10, 13, 20, 45]), 'Velocidad');
   XLSX.utils.book_append_sheet(wb, sheet([['Hora', 'Punto', 'Mapa'], ...r.passes.map(p => [fmtTime(p.t), p.name, mapsUrl(p.lat, p.lng)])], [10, 22, 45]), 'Pasos');
   XLSX.utils.book_append_sheet(wb, sheet([['Nº', 'Inicio', 'Fin', 'Duración (min)'], ...r.rounds.map(x => [x.n, fmtTime(x.start), fmtTime(x.end), mins(x.dur)])], [5, 10, 10, 14]), 'Rondas');
   const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
