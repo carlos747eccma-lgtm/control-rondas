@@ -1,5 +1,5 @@
 // Cache básico para que la app abra sin cobertura (el mapa necesita datos).
-const C='rondas-v7', SHELL=['./','index.html','app.js','config.js','manifest.webmanifest','icon.svg','vendor/jspdf.umd.min.js','vendor/jspdf.plugin.autotable.min.js','vendor/xlsx.mini.min.js','https://unpkg.com/leaflet@1.9.4/dist/leaflet.css','https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'];
+const C='rondas-v8', SHELL=['./','index.html','app.js','config.js','manifest.webmanifest','icon.svg','vendor/jspdf.umd.min.js','vendor/jspdf.plugin.autotable.min.js','vendor/xlsx.mini.min.js','https://unpkg.com/leaflet@1.9.4/dist/leaflet.css','https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'];
 self.addEventListener('install',e=>{e.waitUntil(caches.open(C).then(c=>c.addAll(SHELL)).then(()=>self.skipWaiting()))});
 self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x!==C).map(x=>caches.delete(x)))).then(()=>self.clients.claim()))});
 self.addEventListener('fetch',e=>{

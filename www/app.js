@@ -268,7 +268,7 @@ function banner(msg, kind, ms) { const b = $('banner'); b.textContent = msg; b.c
 let actx = null;
 function audio() { try { actx = actx || new (window.AudioContext || window.webkitAudioContext)(); if (actx.state === 'suspended') actx.resume(); } catch (e) { } return actx; }
 ['touchstart', 'click'].forEach(ev => document.addEventListener(ev, () => audio(), { passive: true }));
-function beep(seq) { // seq: [[frecuencia Hz, duración ms], ...] ; frecuencia 0 = silencio
+function beep(seq) { if (RN) return; // seq: [[frecuencia Hz, duración ms], ...] ; frecuencia 0 = silencio
   const c = audio(); if (!c) return; let t = c.currentTime + 0.02;
   seq.forEach(([f, d]) => { if (f) { const o = c.createOscillator(), g = c.createGain(); o.type = 'square'; o.frequency.value = f; g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.9, t + 0.01); g.gain.setValueAtTime(0.9, t + d / 1000 - 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + d / 1000); o.connect(g).connect(c.destination); o.start(t); o.stop(t + d / 1000 + 0.02); } t += d / 1000; });
 }
@@ -426,6 +426,7 @@ function maxGap(cp, r) {
 }
 
 /* Procesa cada posición del GPS (real o simulada) */
+let fixBatch = false;
 function onFix(raw) {
   const t = raw.t, acc = raw.acc;
   lastFixAt = Date.now(); lastRawAcc = acc;
@@ -448,7 +449,7 @@ function onFix(raw) {
   if (noFixBanner) { noFixBanner = false; banner(''); }
   // 3) Suavizado
   const p = kf.step(raw, acc, t); p.t = t; p.acc = acc;
-  map.me(p, acc);
+  if (!fixBatch) map.me(p, acc);
   let spd = 0;
   if (run.last) {
     const dt = (t - run.lastAcceptT) / 1000, d = hav(run.last, p);
@@ -467,7 +468,7 @@ function onFix(raw) {
   if (step >= Math.max(2.5, acc * 0.3)) {
     if (lp) run.dist += step;
     run.track.push({ lat: +p.lat.toFixed(7), lng: +p.lng.toFixed(7), t, a: Math.round(acc) });
-    map.trackAdd(p);
+    if (!fixBatch) map.trackAdd(p);
     if (run.speed > run.maxSpeed && run.speed < cfg.jumpSpd) run.maxSpeed = run.speed;
   }
   // 5) Patio vigilado
@@ -483,7 +484,7 @@ function onFix(raw) {
     if (ins && run.outside) { run.outside = false; logEv('Vuelve al recinto', p, ''); }
   }
   run.last = { lat: p.lat, lng: p.lng }; run.lastAcceptT = t;
-  renderAll(); persist();
+  if (!fixBatch) { renderAll(); persist(); }
 }
 /* Exceso de velocidad: 3 posiciones seguidas por encima del límite con buena precisión */
 function checkSpeed(spd, p, t, acc) {
@@ -574,7 +575,27 @@ function closeStop(t) {
 /* ---------- GPS ---------- */
 /* ---------- Nativo (APK): GPS en segundo plano y alarmas como notificación ---------- */
 const CAP = window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform() ? window.Capacitor.Plugins : null;
-const BG = CAP && CAP.BackgroundGeolocation, LN = CAP && CAP.LocalNotifications;
+const RN = CAP && CAP.RondasNative; // servicio nativo propio: GPS + alarmas con la pantalla apagada
+const BG = !RN && CAP && CAP.BackgroundGeolocation, LN = !RN && CAP && CAP.LocalNotifications;
+let rnListen = false, rnBusy = false;
+// recoge las posiciones que el servicio nativo guardó (también las de pantalla bloqueada) y las procesa en orden
+async function rnDrain() {
+  if (rnBusy) return; rnBusy = true;
+  try {
+    for (let k = 0; k < 40; k++) {
+      const since = +(LS.get('rp_rnsince') || 0) || Date.now() - 5000;
+      const r = await RN.drain({ since }); const list = (r && r.fixes) || [];
+      if (!list.length) { if (!LS.get('rp_rnsince')) LS.set('rp_rnsince', since); break; }
+      const many = list.length > 5; fixBatch = many;
+      list.forEach(f => { if (!run || run.end || f[4] >= (run.start || 0) - 1000) onFix({ lat: f[0], lng: f[1], acc: f[2], speed: f[3] < 0 ? null : f[3], t: f[4] }); });
+      LS.set('rp_rnsince', list[list.length - 1][4]);
+      if (many) { fixBatch = false; if (run) { map.track(run.track); renderAll(); persist(true); } }
+      if (list.length < 5000) break;
+    }
+  } catch (e) { fixBatch = false; }
+  rnBusy = false;
+}
+function nativeCfg() { return { speedLimit: +cfg.speedLimit || 0, stopAlarm: +cfg.stopAlarm || 0, stopRad: +cfg.stopRad, stopSec: +cfg.stopSec, maxAcc: +cfg.maxAcc, jumpSpd: +cfg.jumpSpd }; }
 let bgWatch = null, lnReady = null;
 function notifReady() {
   if (!LN) return Promise.resolve(false);
@@ -601,6 +622,11 @@ function scheduleStopAlarm() {
 }
 function cancelStopAlarm() { if (!LN || !run || !run.stopNotif) return; run.stopNotif = false; LN.cancel({ notifications: STOP_IDS.map(id => ({ id })) }).catch(() => { }); }
 function startGps() {
+  if (RN) {
+    if (!rnListen) { rnListen = true; setInterval(rnDrain, 1500); document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') rnDrain(); }); }
+    RN.start(nativeCfg()).catch(e => { banner(/NOT_AUTHORIZED|denegado/.test(e.code + e.message) ? 'Permiso de ubicación denegado. Actívalo en Ajustes > Apps > Control de Rondas.' : 'No se pudo iniciar el GPS: ' + e.message, 'bad', 8000); });
+    return;
+  }
   if (BG) {
     if (bgWatch != null) return; bgWatch = 'pending'; notifReady();
     BG.addWatcher({ backgroundTitle: 'Control de Rondas', backgroundMessage: 'Vigilancia GPS activa', requestPermissions: true, stale: false, distanceFilter: 0 }, (loc, err) => {
@@ -616,7 +642,8 @@ function startGps() {
     err => { banner(err.code === 1 ? 'Permiso de ubicación denegado. Actívalo para registrar las rondas.' : 'Sin señal GPS (' + err.message + ')', err.code === 1 ? 'bad' : 'warn', 6000); },
     { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 });
 }
-function stopGps() { if (BG && bgWatch != null && bgWatch !== 'pending') { BG.removeWatcher({ id: bgWatch }).catch(() => { }); } if (BG) bgWatch = null; if (watchId != null) navigator.geolocation.clearWatch(watchId); watchId = null; }
+function stopGps() { if (RN) return; // el servicio nativo es permanente
+ if (BG && bgWatch != null && bgWatch !== 'pending') { BG.removeWatcher({ id: bgWatch }).catch(() => { }); } if (BG) bgWatch = null; if (watchId != null) navigator.geolocation.clearWatch(watchId); watchId = null; }
 function gpsBadge(acc) {
   const el = $('gpsdot');
   if (acc == null) { el.textContent = 'GPS —'; el.style.color = ''; return; }
@@ -1038,7 +1065,7 @@ function bind() {
   };
   $('cpList').onclick = e => { const el = e.target.closest('[data-id]'); if (el) focusPoint(el.dataset.id); };
   $('bSave').onclick = () => {
-    ['maxAcc', 'jumpSpd', 'speedLimit', 'stopSec', 'stopRad', 'stopAlarm', 'covRad', 'freqMin', 'cpRad'].forEach(k => { const v = +$(k).value; cfg[k] = isFinite(v) && $(k).value !== '' && v >= 0 ? v : DEF_CFG[k]; });
+    ['maxAcc', 'jumpSpd', 'speedLimit', 'stopSec', 'stopRad', 'stopAlarm', 'covRad', 'freqMin', 'cpRad'].forEach(k => { const v = +$(k).value; cfg[k] = isFinite(v) && $(k).value !== '' && v >= 0 ? v : DEF_CFG[k]; }); if (RN) RN.start(nativeCfg()).catch(() => { });
     cfg.presets = $('presets').value.trim() || DEF_CFG.presets;
     if (run && !run.end && isFinite(run.periodEnd)) run.periodEnd = nextShift(run.start);
     const { gkey, ...save } = cfg; LS.set('rp_cfg', save); fillCfg(); redrawYard();
@@ -1046,7 +1073,7 @@ function bind() {
   };
   $('evList').onclick = e => { const li = e.target.closest('[data-go]'); if (li) { const [lat, lng] = li.dataset.go.split(',').map(Number); map.center({ lat, lng }, 19); } };
   const cur = () => viewing ? viewing.live : run;
-  $('bBeep').onclick = () => { SND.alarm(); notify([{ id: 9199, at: Date.now() + 10000, title: 'Prueba de alarma', body: 'Así suena la alarma con la pantalla apagada' }]); if (LN) banner('Apaga la pantalla: en 10 s suena la alarma de prueba', '', 8000); };
+  $('bBeep').onclick = () => { if (RN) { RN.test(); banner('Apaga la pantalla: en 10 s suena la alarma de prueba', '', 8000); return; } SND.alarm(); notify([{ id: 9199, at: Date.now() + 10000, title: 'Prueba de alarma', body: 'Así suena la alarma con la pantalla apagada' }]); if (LN) banner('Apaga la pantalla: en 10 s suena la alarma de prueba', '', 8000); };
   $('bReportNow').onclick = () => sharePdf(cur()).catch(err => banner('No se pudo crear el PDF: ' + err.message, 'bad', 5000));
   $('bXlsNow').onclick = () => shareXlsx(cur()).catch(err => banner('No se pudo crear el Excel: ' + err.message, 'bad', 5000));
   $('bXlsAll').onclick = () => shareAllXlsx().catch(err => banner('No se pudo crear el Excel: ' + err.message, 'bad', 5000));

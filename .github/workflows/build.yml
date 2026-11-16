@@ -51,7 +51,7 @@ jobs:
       - name: Permisos de ubicación y pantalla encendida
         run: |
           M=android/app/src/main/AndroidManifest.xml
-          sed -i 's|<application|<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n    <uses-permission android:name="android.permission.VIBRATE" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />\n    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />\n    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />\n    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <uses-feature android:name="android.hardware.location.gps" android:required="false" />\n\n    <application|' $M
+          sed -i 's|<application|<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n    <uses-permission android:name="android.permission.VIBRATE" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />\n    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />\n    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />\n    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />\n    <uses-feature android:name="android.hardware.location.gps" android:required="false" />\n\n    <application|' $M
           F=$(find android/app/src/main/java -name MainActivity.java)
           cat > "$F" <<'JAVA'
           package com.controlrondas.app;
@@ -67,6 +67,7 @@ jobs:
           public class MainActivity extends BridgeActivity {
               @Override
               public void onCreate(Bundle savedInstanceState) {
+                  registerPlugin(RondasPlugin.class);
                   super.onCreate(savedInstanceState);
                   // Para que el GPS y las alarmas sigan con la pantalla apagada: pedir que no se optimice la bateria
                   try {
@@ -88,6 +89,8 @@ jobs:
           }
           JAVA
           sed -i 's/^          //' "$F"
+          cp native/java/*.java "$(dirname "$F")/"
+          sed -i 's|</application>|    <service android:name=".GuardService" android:enabled="true" android:exported="false" android:foregroundServiceType="location" />\n    </application>|' $M
           cat $M
       - name: Sonido de alarma e icono de notificación
         run: |
