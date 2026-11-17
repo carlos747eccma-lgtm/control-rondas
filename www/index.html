@@ -49,6 +49,8 @@ button{font:inherit;color:inherit;cursor:pointer}
 .chipbox{background:rgba(11,18,32,.9);border:1px solid var(--line);border-radius:8px;padding:4px 8px;font-size:11px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .chipbox i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:3px;vertical-align:-1px}
 #gpsdot{font-weight:700}
+#bLock,#bFull{position:absolute;right:10px;z-index:900;width:42px;height:42px;border-radius:10px;border:1px solid var(--line);background:rgba(11,18,32,.92);color:#e8edf6;font-size:18px;display:grid;place-items:center}#bLock{bottom:108px}#bFull{bottom:158px}#bLock.on,#bFull.on{border-color:#22d3ee;background:rgba(8,51,68,.95)}
+body.mapfull #mapwrap{position:fixed;inset:0;z-index:2000;min-height:0}
 #ships{position:absolute;right:10px;bottom:58px;z-index:900;height:42px;min-width:42px;padding:0 8px;border-radius:10px;border:1px solid var(--line);background:rgba(11,18,32,.92);color:#e8edf6;font:700 13px system-ui;display:flex;align-items:center;gap:4px}#ships.on{border-color:#22d3ee;color:#22d3ee}#ships[hidden]{display:none}
 #locate{position:absolute;right:10px;bottom:8px;z-index:900;width:42px;height:42px;border-radius:10px;border:1px solid var(--line);background:rgba(11,18,32,.92);display:grid;place-items:center}
 .mode-edit #map{outline:3px solid var(--warn);outline-offset:-3px}
@@ -154,6 +156,8 @@ input,select{width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(
   <div id="mapwrap">
     <div id="map"></div>
     <div id="banner"></div>
+    <button id="bFull" title="Mapa a pantalla completa" aria-label="Mapa a pantalla completa">⛶</button>
+    <button id="bLock" title="Dejar el mapa fijo con todo el recorrido" aria-label="Dejar el mapa fijo">🔓</button>
     <button id="ships" hidden title="Barcos en tiempo real (AIS)" aria-label="Barcos en tiempo real">🚢<span id="shipsN"></span></button>
     <button id="locate" title="Centrar en mi posición" aria-label="Centrar en mi posición"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#e8edf6" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg></button>
     <div class="mapchips">

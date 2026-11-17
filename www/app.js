@@ -140,7 +140,9 @@ function shipInfo(mmsi) {
   const [tipo] = SHIP_T(s.type || 0), st = NAV_ST[s.nav], L = (s.a || 0) + (s.b || 0);
   banner((s.name || 'MMSI ' + s.mmsi) + ' · ' + tipo + (L ? ' · ' + L + ' m' : '') + ' · ' + (st || (s.sog > 0.5 ? 'En movimiento' : 'Parado')) + (s.sog > 0.5 ? ' ' + s.sog.toFixed(1) + ' nudos' : '') + (s.dest ? ' · Destino ' + s.dest : '') + ' · visto ' + fmtHM(s.t), '', 7000);
 }
-function spHtml(o) { return '<div style="transform:translate(-50%,-50%);background:#dc2626;color:#fff;font:700 11px system-ui;padding:2px 6px;border-radius:6px;border:2px solid #fff;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,.5)">⚡ ' + o.max + ' km/h · ' + spSecs(o) + ' s · ' + fmtHM(o.from) + '</div>'; }
+function spTxt(o) { return '⚡ Exceso: ' + o.max + ' km/h a las ' + fmtTime(o.from) + ' durante ' + fmtSec(spSecs(o)); }
+// marcador pequeño de exceso de velocidad (el detalle sale al tocarlo)
+function spHtml(o) { return '<div data-sp="' + esc(spTxt(o)) + '" title="' + esc(spTxt(o)) + '" style="transform:translate(-50%,-50%);width:16px;height:16px;border-radius:50%;background:#dc2626;border:1.5px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,.6);display:grid;place-items:center;font:700 9px/1 system-ui;color:#fff;cursor:pointer">⚡</div>'; }
 function cpHtml(e) {
   const r = e.type === 'salida' ? '4px' : '50%';
   return '<div style="transform:translate(-12px,-12px);display:flex;align-items:center;gap:4px;white-space:nowrap"><span style="display:grid;place-items:center;width:24px;height:24px;border-radius:' + r + ';background:' + STC[e.k] + ';border:2px solid #fff;color:#fff;font:700 11px system-ui;box-shadow:0 1px 4px rgba(0,0,0,.5)">' + esc(e.short) + '</span><span style="background:rgba(11,18,32,.85);color:#fff;font:600 11px system-ui;padding:1px 5px;border-radius:4px">' + esc(e.name) + '</span></div>';
@@ -203,9 +205,11 @@ function LeafletAdapter() {
       if (!me) { meAcc = L.circle([p.lat, p.lng], { radius: acc, color: COL.blu, weight: 1, fillOpacity: .12, interactive: false }).addTo(m); me = L.circleMarker([p.lat, p.lng], { radius: 8, color: '#fff', weight: 2, fillColor: COL.blu, fillOpacity: 1, interactive: false }).addTo(m); }
       else { me.setLatLng([p.lat, p.lng]); meAcc.setLatLng([p.lat, p.lng]).setRadius(acc); }
     },
-    stops(list) { gStops.clearLayers(); list.forEach(s => s.sp ? L.marker([s.lat, s.lng], { icon: L.divIcon({ className: '', iconSize: null, html: spHtml(s) }) }).addTo(gStops) : L.circleMarker([s.lat, s.lng], { radius: 6 + Math.min(10, s.dur / 60000), color: '#000', weight: 1, fillColor: COL.amb, fillOpacity: .95 }).bindTooltip(fmtDur(s.dur) + ' parado').addTo(gStops)); },
+    stops(list) { gStops.clearLayers(); list.forEach(s => s.sp ? L.marker([s.lat, s.lng], { icon: L.divIcon({ className: '', iconSize: null, html: spHtml(s) }) }).on('click', () => banner(spTxt(s), 'bad', 5000)).addTo(gStops) : L.circleMarker([s.lat, s.lng], { radius: 6 + Math.min(10, s.dur / 60000), color: '#000', weight: 1, fillColor: COL.amb, fillOpacity: .95 }).bindTooltip(fmtDur(s.dur) + ' parado').addTo(gStops)); },
     points(list) { gExits.clearLayers(); list.forEach(e => L.marker([e.lat, e.lng], { icon: L.divIcon({ className: '', iconSize: null, html: cpHtml(e) }) }).on('click', () => focusPoint(e.id)).addTo(gExits)); },
     draft(pts) { gDraft.clearLayers(); if (pts.length) { L.polyline(pts.map(p => [p.lat, p.lng]), { color: COL.amb, weight: 3 }).addTo(gDraft); pts.forEach(p => L.circleMarker([p.lat, p.lng], { radius: 5, color: COL.amb, fillOpacity: 1 }).addTo(gDraft)); } },
+    lock(on) { ['dragging', 'touchZoom', 'doubleClickZoom', 'scrollWheelZoom', 'boxZoom', 'keyboard'].forEach(k => m[k] && m[k][on ? 'disable' : 'enable']()); },
+    resize() { m.invalidateSize(); },
     ships(list) {
       if (!gShips) { gShips = L.layerGroup().addTo(m); m.on('zoomend', () => this.ships(shipList)); } shipList = list; gShips.clearLayers();
       const c = m.getCenter(), pxm = Math.pow(2, m.getZoom()) / (156543.03 * Math.cos(c.lat * Math.PI / 180));
@@ -240,7 +244,7 @@ function GoogleAdapter(key) {
           ov.setMap(m);
           // puntos de control como etiquetas HTML (mismo aspecto que sin Google)
           ptsOv = new google.maps.OverlayView();
-          ptsOv.onAdd = function () { this.d = document.createElement('div'); this.d.style.cssText = 'position:absolute;left:0;top:0'; this.d.onclick = e => { const el = e.target.closest('[data-pid]'); if (el) { e.stopPropagation(); focusPoint(el.dataset.pid); } }; this.getPanes().overlayMouseTarget.appendChild(this.d); };
+          ptsOv.onAdd = function () { this.d = document.createElement('div'); this.d.style.cssText = 'position:absolute;left:0;top:0'; this.d.onclick = e => { const sp = e.target.closest('[data-sp]'); if (sp) { e.stopPropagation(); banner(sp.dataset.sp, 'bad', 5000); return; } const el = e.target.closest('[data-pid]'); if (el) { e.stopPropagation(); focusPoint(el.dataset.pid); } }; this.getPanes().overlayMouseTarget.appendChild(this.d); };
           ptsOv.draw = function () {
             const pr = this.getProjection(); if (!pr || !this.d) return;
             this.d.innerHTML = stopsList.map(s => { if (s.sp) { const q = pr.fromLatLngToDivPixel(new google.maps.LatLng(s.lat, s.lng)); return '<div style="position:absolute;left:' + q.x + 'px;top:' + q.y + 'px">' + spHtml(s) + '</div>'; } const q = pr.fromLatLngToDivPixel(new google.maps.LatLng(s.lat, s.lng)), r = 6 + Math.min(10, s.dur / 60000); return '<div title="' + fmtDur(s.dur) + ' parado" style="position:absolute;left:' + (q.x - r) + 'px;top:' + (q.y - r) + 'px;width:' + 2 * r + 'px;height:' + 2 * r + 'px;border-radius:50%;background:#f59e0b;border:1px solid #000;opacity:.95"></div>'; }).join('') + ptsList.map(e => { const q = pr.fromLatLngToDivPixel(new google.maps.LatLng(e.lat, e.lng)); return '<div data-pid="' + e.id + '" style="position:absolute;left:' + q.x + 'px;top:' + q.y + 'px;cursor:pointer">' + cpHtml(e) + '</div>'; }).join('');
@@ -281,6 +285,8 @@ function GoogleAdapter(key) {
     stops(list) { stopsList = list; if (ptsOv) ptsOv.draw(); },
     points(list) { ptsList = list; if (ptsOv) ptsOv.draw(); },
     ships(list) { shipList = list; if (shipOv) shipOv.draw(); },
+    lock(on) { m.setOptions({ gestureHandling: on ? 'none' : 'greedy', zoomControl: !on, keyboardShortcuts: !on, disableDoubleClickZoom: on }); },
+    resize() { google.maps.event.trigger(m, 'resize'); },
     draft(pts) { draftArr.forEach(x => x.setMap(null)); draftArr = []; if (pts.length) { draftArr.push(new google.maps.Polyline({ map: m, path: pts.map(LL), strokeColor: COL.amb, strokeWeight: 3, clickable: false })); pts.forEach(p => draftArr.push(new google.maps.Marker({ map: m, position: LL(p), clickable: false, icon: { path: google.maps.SymbolPath.CIRCLE, scale: 5, fillColor: COL.amb, fillOpacity: 1, strokeWeight: 0 } }))); } }
   };
 }
@@ -331,7 +337,7 @@ function stopShips() {
 }
 document.addEventListener('visibilitychange', () => { if (!AIS_KEY) return; if (document.visibilityState === 'visible') startShips(); else if (RN) RN.shipsStop && RN.shipsStop().catch(() => { }); });
 
-let map;
+let map, mapLocked = false;
 async function initMap() {
   const center = yard.boundary[0] || LS.get('rp_lastpos', VLC);
   const zoom = yard.boundary.length ? 17 : 16;
@@ -1190,6 +1196,13 @@ function bind() {
   const cur = () => viewing ? viewing.live : run;
   if (AIS_KEY) { $('ships').hidden = false; $('ships').classList.toggle('on', shipsOn); }
   $('ships').onclick = () => { shipsOn = !shipsOn; LS.set('rp_ships', shipsOn); $('ships').classList.toggle('on', shipsOn); if (shipsOn) { startShips(); banner('Barcos en tiempo real activados (pueden tardar unos minutos en aparecer)', '', 4000); } else stopShips(); };
+  // mapa fijo: encuadra la zona y todo el recorrido y bloquea el movimiento con los dedos
+  $('bLock').onclick = () => {
+    mapLocked = !mapLocked; $('bLock').classList.toggle('on', mapLocked); $('bLock').innerHTML = mapLocked ? '🔒' : '🔓';
+    if (mapLocked) { const r = viewing || run, pts = [].concat(yard.boundary, (r && r.track) || []); if (pts.length) map.fit(pts); banner('Mapa fijo: muestra toda la zona y el recorrido. Pulsa 🔒 para moverlo otra vez.', '', 4000); }
+    map.lock && map.lock(mapLocked);
+  };
+  $('bFull').onclick = () => { document.body.classList.toggle('mapfull'); $('bFull').classList.toggle('on', document.body.classList.contains('mapfull')); setTimeout(() => { map.resize && map.resize(); if (mapLocked) $('bLock').onclick(), $('bLock').onclick(); }, 120); };
   $('bRelevo').onclick = () => setRelevo(!(run && run.relevo));
   $('bBeep').onclick = () => { if (RN) { RN.test(); banner('Apaga la pantalla: en 10 s suena la alarma de prueba', '', 8000); return; } SND.alarm(); notify([{ id: 9199, at: Date.now() + 10000, title: 'Prueba de alarma', body: 'Así suena la alarma con la pantalla apagada' }]); if (LN) banner('Apaga la pantalla: en 10 s suena la alarma de prueba', '', 8000); };
   $('bReportNow').onclick = () => sharePdf(cur()).catch(err => banner('No se pudo crear el PDF: ' + err.message, 'bad', 5000));
