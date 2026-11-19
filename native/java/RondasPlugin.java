@@ -72,6 +72,14 @@ public class RondasPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void stop(PluginCall call) {
+        try { ShipFeed.stop(); } catch (Exception e) { }
+        try { getContext().stopService(new Intent(getContext(), GuardService.class)); } catch (Exception e) { }
+        call.resolve();
+        if (getActivity() != null) getActivity().runOnUiThread(() -> getActivity().finishAndRemoveTask());
+    }
+
+    @PluginMethod
     public void relevo(PluginCall call) {
         try {
             Intent i = new Intent(getContext(), GuardService.class);

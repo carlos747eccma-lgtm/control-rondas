@@ -1257,6 +1257,14 @@ function bind() {
     if (d.ren != null) { const n = prompt('Nuevo nombre', yard.points[+d.ren].name); if (n) { yard.points[+d.ren].name = n; saveYard(); } }
   };
   $('cpList').onclick = e => { const el = e.target.closest('[data-id]'); if (el) focusPoint(el.dataset.id); };
+  // apagar la app (solo el responsable: está dentro de Configurar con contraseña)
+  $('bOff').onclick = async () => {
+    if (!confirm('¿Apagar la app? Se guarda el turno actual, se para el GPS y dejan de sonar las alarmas hasta que se vuelva a abrir.')) return;
+    if (run && !run.end) { logEv('App apagada por el responsable', run.last, 'warn'); finishRun(); }
+    stopShips(); run = null;
+    if (RN && RN.stop) { try { await RN.stop(); } catch (e) { } return; }
+    stopGps(); banner('App apagada: seguimiento detenido. Recarga la página para volver a empezar.', 'warn');
+  };
   $('bSave').onclick = () => {
     ['maxAcc', 'jumpSpd', 'speedLimit', 'stopSec', 'stopRad', 'stopAlarm', 'covRad', 'freqMin', 'cpRad'].forEach(k => { const v = +$(k).value; cfg[k] = isFinite(v) && $(k).value !== '' && v >= 0 ? v : DEF_CFG[k]; }); if (RN) RN.start(nativeCfg()).catch(() => { });
     cfg.presets = $('presets').value.trim() || DEF_CFG.presets;
