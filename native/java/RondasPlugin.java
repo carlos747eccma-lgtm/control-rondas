@@ -80,6 +80,34 @@ public class RondasPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void email(PluginCall call) {
+        try {
+            java.util.ArrayList<String> tos = new java.util.ArrayList<>();
+            com.getcapacitor.JSArray to = call.getArray("to");
+            if (to != null) for (int k = 0; k < to.length(); k++) tos.add(to.getString(k));
+            java.util.ArrayList<android.net.Uri> uris = new java.util.ArrayList<>();
+            com.getcapacitor.JSArray paths = call.getArray("paths");
+            if (paths != null) for (int k = 0; k < paths.length(); k++) {
+                java.io.File f = new java.io.File(android.net.Uri.parse(paths.getString(k)).getPath());
+                uris.add(androidx.core.content.FileProvider.getUriForFile(getContext(), getContext().getPackageName() + ".fileprovider", f));
+            }
+            Intent i = new Intent(uris.size() > 1 ? Intent.ACTION_SEND_MULTIPLE : Intent.ACTION_SEND);
+            i.setType("application/pdf");
+            i.putExtra(Intent.EXTRA_EMAIL, tos.toArray(new String[0]));
+            i.putExtra(Intent.EXTRA_SUBJECT, call.getString("subject", ""));
+            i.putExtra(Intent.EXTRA_TEXT, call.getString("body", ""));
+            if (uris.size() > 1) i.putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris);
+            else if (uris.size() == 1) i.putExtra(Intent.EXTRA_STREAM, uris.get(0));
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            Intent ch = Intent.createChooser(i, "Enviar informe por correo");
+            ch.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            if (getActivity() != null) getActivity().startActivity(ch);
+            else { ch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); getContext().startActivity(ch); }
+            call.resolve();
+        } catch (Exception e) { call.reject(e.getMessage()); }
+    }
+
+    @PluginMethod
     public void relevo(PluginCall call) {
         try {
             Intent i = new Intent(getContext(), GuardService.class);

@@ -6,7 +6,7 @@ const LS = {
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { console.warn('storage', e); } }
 };
 
-const DEF_CFG = { gkey: (window.RONDAS_GOOGLE_KEY || ''), maxAcc: 25, jumpSpd: 90, speedLimit: 25, stopSec: 30, stopRad: 8, stopAlarm: 10, cellSize: 15, covRad: 10, presets: '06-14, 14-22, 22-06', freqMin: 60, cpRad: 15 };
+const DEF_CFG = { gkey: (window.RONDAS_GOOGLE_KEY || ''), maxAcc: 25, jumpSpd: 90, speedLimit: 25, stopSec: 30, stopRad: 8, stopAlarm: 10, cellSize: 15, covRad: 10, presets: '06-14, 14-22, 22-06', mails: '', freqMin: 60, cpRad: 15 };
 let cfg = Object.assign({}, DEF_CFG, LS.get('rp_cfg', {}));
 if (!LS.get('rp_mig10')) { LS.set('rp_mig10', 1); if (cfg.stopAlarm === 5) { cfg.stopAlarm = 10; LS.set('rp_cfg', Object.assign(LS.get('rp_cfg', {}), { stopAlarm: 10 })); } } // alarma de parado: 5 → 10 min
 // parada larga = incidencia (las paradas en modo relevo no cuentan)
@@ -607,6 +607,7 @@ function finishRun() {
   stopGps(); stopSim(); simClock = null; releaseAwake();
   const h = LS.get('rp_hist', []); h.unshift(slim(run)); LS.set('rp_hist', h.slice(0, 60));
   LS.set('rp_run', null); renderHist();
+  run.ops = typeof roRecsFor === 'function' ? roRecsFor(run) : []; h[0].ops = run.ops; LS.set('rp_hist', h.slice(0, 60)); queueMail(h[0]);
 }
 function slim(r) { const o = Object.assign({}, r); delete o.anchor; delete o.near; delete o.overdue; return o; }
 let persistT = 0;
@@ -1158,8 +1159,8 @@ function runSummary(r) {
   const longStops = r.stops.filter(s => isLong(s));
   return { exp, comp, cov: r.end ? r.coverage : covPct(), longStops, late: runPoints(r).filter(c => maxGap(c, r) > cfg.freqMin * 60000) };
 }
-async function sharePdf(r) {
-  banner('Preparando PDF…', '', 2000);
+async function sharePdf(r, opts) {
+  opts = opts || {}; if (!opts.blob) banner('Preparando PDF…', '', 2000);
   await loadScript('vendor/jspdf.umd.min.js'); await loadScript('vendor/jspdf.plugin.autotable.min.js');
   const { jsPDF } = window.jspdf, doc = new jsPDF({ unit: 'mm', format: 'a4' }), S = runSummary(r), due = cfg.freqMin * 60000, end = r.end || nowT();
   const RED = [185, 28, 28], GRN = [21, 128, 61], AMB = [180, 83, 9];
@@ -1197,12 +1198,62 @@ async function sharePdf(r) {
   if ((r.speeding || []).length) tbl('Excesos de velocidad', ['Nº', 'Hora', 'Duración', 'Velocidad máx.', 'Posición'], r.speeding.map((o, k) => row(['V' + (k + 1), fmtTime(o.from), fmtSec(spSecs(o)), o.max + ' km/h', o.lat.toFixed(5) + ', ' + o.lng.toFixed(5)], RED)), 3);
   if ((r.gaps || []).length) tbl('Cortes de señal GPS', ['Nº', 'Desde', 'Hasta', 'Duración', 'Última posición'], r.gaps.map((g, k) => row(['C' + (k + 1), fmtTime(g.from), fmtTime(g.to), fmtMin(g.dur), g.lat != null ? g.lat.toFixed(5) + ', ' + g.lng.toFixed(5) : '—'], RED)), 3);
   tbl('Paradas', ['Nº', 'Desde', 'Hasta', 'Duración', 'Posición'], r.stops.map((s, k) => row([String(k + 1), fmtTime(s.from), fmtTime(s.to), fmtMin(s.dur), s.lat.toFixed(5) + ', ' + s.lng.toFixed(5)], isLong(s) ? RED : null)), 3);
+  if (typeof roRecsFor === 'function') { const ops = roRecsFor(r); if (ops.length) tbl('Registro de operativas', ['Hora', 'Operativa'], ops.map(o => [fmtTime(o.t), o.txt + (o.note ? ' (' + o.note + ')' : '')])); }
   if (runPoints(r).length) tbl('Rondas completas', ['Nº', 'Inicio', 'Fin', 'Duración'], r.rounds.map(x => [String(x.n), fmtTime(x.start), fmtTime(x.end), fmtMin(x.dur)]));
   if (y > 262) { doc.addPage(); y = 20; }
   doc.setDrawColor(0); doc.line(14, y + 16, 90, y + 16); doc.line(120, y + 16, 196, y + 16); doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.text('Firma del vigilante', 14, y + 21); doc.text('Firma del supervisor', 120, y + 21);
   const n = doc.getNumberOfPages(); for (let i = 1; i <= n; i++) { doc.setPage(i); doc.setFontSize(7.5); doc.setTextColor(120); doc.text('Control de Rondas · generado ' + fmtDate(Date.now()) + ' · página ' + i + ' de ' + n, 14, 290); }
-  await shareFile('informe-turno-' + (r.shiftLabel ? r.shiftLabel.replace(/[^0-9]+/g, '-') + '_' : '') + stamp(r.start) + '.pdf', doc.output('blob'), 'Informe de rondas ' + fmtDate(r.start));
+  const fname = 'informe-turno-' + (r.shiftLabel ? r.shiftLabel.replace(/[^0-9]+/g, '-') + '_' : '') + stamp(r.start) + '.pdf';
+  if (opts.blob) return { name: fname, blob: doc.output('blob') };
+  await shareFile(fname, doc.output('blob'), 'Informe de rondas ' + fmtDate(r.start));
 }
+/* PDF del registro de operativas (informe diario de servicios); con r, solo las del turno */
+async function opsPdf(r, opts) {
+  opts = opts || {};
+  await loadScript('vendor/jspdf.umd.min.js'); await loadScript('vendor/jspdf.plugin.autotable.min.js');
+  const { jsPDF } = window.jspdf, doc = new jsPDF({ unit: 'mm', format: 'a4' }), h = RO.head, recs = r ? roRecsFor(r) : RO.recs.slice();
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.text('Informe diario de servicios', 14, 16);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(10);
+  const lines = [['Fecha', r ? fmtDate(r.start) + ' – ' + fmtDate(r.end || Date.now()) : (h.fecha || '')], ['Centro de trabajo', h.centro || 'APM Terminals Valencia'], ['Vigilante de seguridad', (h.vig || (r && r.guard) || '—') + (h.cod ? '  ·  Código empleado: ' + h.cod : '')], ['Jefe de equipo', h.jefe || '—']];
+  if (r && r.shiftLabel) lines.splice(1, 0, ['Turno', r.shiftLabel]);
+  doc.autoTable({ startY: 21, body: lines, theme: 'plain', styles: { fontSize: 10, cellPadding: 1 }, columnStyles: { 0: { fontStyle: 'bold', cellWidth: 48 } }, margin: { left: 14, right: 14 } });
+  let y = doc.lastAutoTable.finalY + 6;
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.text('Descripción del servicio', 14, y);
+  doc.autoTable({ startY: y + 2, head: [['Hora', 'Operativa', 'Posición']], body: recs.length ? recs.map(o => [hm(o.t) + ' h', o.txt + (o.note ? ' (' + o.note + ')' : ''), o.lat != null ? o.lat.toFixed(5) + ', ' + o.lng.toFixed(5) : '']) : [[{ content: 'Sin registros', colSpan: 3 }]],
+    theme: 'striped', styles: { fontSize: 9, cellPadding: 1.8 }, headStyles: { fillColor: [30, 58, 95] }, columnStyles: { 0: { cellWidth: 16 }, 2: { cellWidth: 34, fontSize: 7.5, textColor: 110 } }, margin: { left: 14, right: 14 } });
+  y = doc.lastAutoTable.finalY + 8;
+  const st = Object.entries(RO.stats); if (st.length && !r) { doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.text('Tiempo por puesto', 14, y); doc.autoTable({ startY: y + 2, head: [['Puesto', 'Total', 'Veces']], body: st.map(([k, s]) => [k, hDur(s.ms), String(s.n)]), theme: 'striped', styles: { fontSize: 9 }, headStyles: { fillColor: [30, 58, 95] }, margin: { left: 14, right: 14 } }); y = doc.lastAutoTable.finalY + 8; }
+  if (y > 262) { doc.addPage(); y = 20; }
+  doc.setDrawColor(0); doc.line(14, y + 16, 90, y + 16); doc.line(120, y + 16, 196, y + 16); doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.text('Firma del vigilante', 14, y + 21); doc.text('Firma del jefe de equipo', 120, y + 21);
+  const n = doc.getNumberOfPages(); for (let i = 1; i <= n; i++) { doc.setPage(i); doc.setFontSize(7.5); doc.setTextColor(120); doc.text('Control de Rondas · Registro de operativas · ' + fmtDate(Date.now()) + ' · página ' + i + ' de ' + n, 14, 290); }
+  const fname = 'registro-operativas-' + stamp(r ? r.start : Date.now()) + '.pdf';
+  if (opts.blob) return { name: fname, blob: doc.output('blob') };
+  await shareFile(fname, doc.output('blob'), 'Registro de operativas ' + (h.fecha || ''));
+}
+/* Correo con los PDF del turno: se abre el correo con destinatarios y adjuntos (1 toque en Enviar) */
+async function mailReports(r) {
+  const to = (cfg.mails || '').split(/[,;\s]+/).filter(x => /@/.test(x));
+  banner('Preparando el correo con los informes…', '', 4000);
+  const files = [await sharePdf(r, { blob: true }), await opsPdf(r, { blob: true })];
+  const subject = 'Informe de turno ' + (r.shiftLabel || '') + ' · ' + fmtDate(r.start) + ' · ' + (r.guard || RO.head.vig || '');
+  const body = 'Adjunto el informe de rondas y el registro de operativas del turno ' + (r.shiftLabel || '') + ' (' + fmtDate(r.start) + ' – ' + fmtDate(r.end || Date.now()) + ').\nVigilante: ' + (r.guard || RO.head.vig || '—') + '\n\nEnviado desde Control de Rondas.';
+  const Cap = window.Capacitor;
+  if (RN && RN.email && Cap.Plugins.Filesystem) {
+    const paths = []; for (const f of files) { const w = await Cap.Plugins.Filesystem.writeFile({ path: f.name, data: await blobToB64(f.blob), directory: 'CACHE' }); paths.push(w.uri); }
+    await RN.email({ to, subject, body, paths }); return true;
+  }
+  files.forEach(f => download(f.name, f.blob));
+  location.href = 'mailto:' + encodeURIComponent(to.join(',')) + '?subject=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(body + '\n\n(Adjunta los PDF descargados)');
+  return true;
+}
+// al cerrar un turno se deja pendiente el correo; se abre en cuanto la app está a la vista
+function queueMail(r) { if (!cfg.mails || !r || r.sim || (r.end - r.start) < 10 * 60000) return; LS.set('rp_mailq', r.id); setTimeout(flushMail, 800); }
+async function flushMail() {
+  const id = LS.get('rp_mailq', null); if (!id || document.visibilityState !== 'visible') return;
+  const r = LS.get('rp_hist', []).find(x => x.id === id); LS.set('rp_mailq', null); if (!r) return;
+  try { await mailReports(r); } catch (e) { banner('No se pudo preparar el correo: ' + e.message, 'bad', 6000); }
+}
+document.addEventListener('visibilitychange', flushMail);
 function sheet(rows, widths) {
   const ws = XLSX.utils.aoa_to_sheet(rows);
   if (widths) ws['!cols'] = widths.map(w => ({ wch: w }));
@@ -1223,6 +1274,7 @@ async function shareXlsx(r) {
   XLSX.utils.book_append_sheet(wb, sheet([['Punto', 'Tipo', 'Pasos', 'Último paso', 'Mayor tiempo sin pasar (min)', 'Estado'], ...runPoints(r).map(c => { const g = maxGap(c, r); return [c.name, c.type === 'salida' ? 'Salida' : 'Punto', r.passes.filter(p => p.id === c.id).length, r.lastPass[c.id] ? fmtTime(r.lastPass[c.id]) : 'nunca', mins(g), g > due ? 'RETRASO' : 'OK']; })], [22, 8, 7, 12, 26, 10]), 'Puntos');
   XLSX.utils.book_append_sheet(wb, sheet([['Hora', 'Gravedad', 'Detalle', 'Mapa'], ...r.events.filter(e => e.k === 'bad' || e.k === 'warn').map(e => [fmtTime(e.t), e.k === 'bad' ? 'Alta' : 'Media', e.txt, mapsUrl(e.lat, e.lng)])], [10, 9, 60, 45]), 'Incidencias');
   XLSX.utils.book_append_sheet(wb, sheet([['Nº', 'Desde', 'Hasta', 'Duración (min)', 'Larga', 'Mapa'], ...r.stops.map((s, k) => [k + 1, fmtTime(s.from), fmtTime(s.to), mins(s.dur), isLong(s) ? 'SÍ' : '', mapsUrl(s.lat, s.lng)])], [5, 10, 10, 14, 7, 45]), 'Paradas');
+  if (typeof roRecsFor === 'function') XLSX.utils.book_append_sheet(wb, sheet([['Hora', 'Operativa', 'Nota', 'Mapa'], ...roRecsFor(r).map(o => [fmtTime(o.t), o.txt, o.note || '', mapsUrl(o.lat, o.lng)])], [10, 70, 25, 45]), 'Operativas');
   XLSX.utils.book_append_sheet(wb, sheet([['Hora', 'Duración (s)', 'Velocidad máx. (km/h)', 'Mapa'], ...(r.speeding || []).map(o => [fmtTime(o.from), spSecs(o), o.max, mapsUrl(o.lat, o.lng)])], [10, 13, 20, 45]), 'Velocidad');
   XLSX.utils.book_append_sheet(wb, sheet([['Hora', 'Punto', 'Mapa'], ...r.passes.map(p => [fmtTime(p.t), p.name, mapsUrl(p.lat, p.lng)])], [10, 22, 45]), 'Pasos');
   XLSX.utils.book_append_sheet(wb, sheet([['Nº', 'Inicio', 'Fin', 'Duración (min)'], ...r.rounds.map(x => [x.n, fmtTime(x.start), fmtTime(x.end), mins(x.dur)])], [5, 10, 10, 14]), 'Rondas');
@@ -1264,6 +1316,7 @@ function toCsv(r) {
 const PIN = '1490';
 function setLocked(v) { $('lockBox').style.display = v ? '' : 'none'; $('cfgBody').style.display = v ? 'none' : ''; if (v && editMode) { draft = []; endEdit(); map.draft([]); } }
 function switchTab(id) {
+  const was = document.body.classList.contains('opsmode'); document.body.classList.toggle('opsmode', id === 'pOps'); if (was && id !== 'pOps') setTimeout(() => map.resize && map.resize(), 100);
   if (id !== 'pConfig') setLocked(true); document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.p === id)); document.querySelectorAll('.pane').forEach(p => p.classList.toggle('on', p.id === id)); }
 function startEdit(mode, msg) { editMode = mode; document.body.classList.add('mode-edit'); banner(msg, 'warn'); }
 function endEdit() { editMode = null; document.body.classList.remove('mode-edit'); $('drawRow').style.display = 'none'; banner(''); }
@@ -1306,6 +1359,7 @@ function bind() {
     ['maxAcc', 'jumpSpd', 'speedLimit', 'stopSec', 'stopRad', 'stopAlarm', 'covRad', 'freqMin', 'cpRad'].forEach(k => { const v = +$(k).value; cfg[k] = isFinite(v) && $(k).value !== '' && v >= 0 ? v : DEF_CFG[k]; }); if (RN) RN.start(nativeCfg()).catch(() => { });
     cfg.presets = $('presets').value.trim() || DEF_CFG.presets;
     if (run && !run.end && isFinite(run.periodEnd)) run.periodEnd = nextShift(run.start);
+    cfg.mails = ($('mails').value || '').split(/[,;\s]+/).filter(x => /@/.test(x)).join(', ');
     const { gkey, ...save } = cfg; LS.set('rp_cfg', save); fillCfg(); redrawYard();
     banner('Configuración guardada', '', 2000);
   };
