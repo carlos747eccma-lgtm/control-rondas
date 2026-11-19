@@ -360,8 +360,12 @@ let map, mapLocked = false;
 const PLAN_W = 3072, PLAN_H = 1200;
 // recinto del patio dentro de la imagen (px): para encajarlo con el límite dibujado
 const PLAN_YARD = { x0: 200, x1: 3030, y0: 210, y1: 904 };
+// georreferenciado con puntos fijos sobre el satélite: rotonda del vial de acceso y punta sur del muelle (error estimado < 10 m)
+const PLAN_GEO = { on: true, op: 0.9, lat: 39.4530934, lng: -0.3171526, mpp: 0.525577, rot: 62.67 };
 let plan = LS.get('rp_plan', null), planAdj = false;
-function planDefault() {
+if (!LS.get('rp_plan21')) { LS.set('rp_plan21', 1); plan = Object.assign({}, PLAN_GEO); LS.set('rp_plan', plan); }
+function planDefault() { return Object.assign({}, PLAN_GEO); }
+function planFromBoundary() {
   // si hay límite dibujado, se encaja el patio del plano con él (eje largo del límite); si no, posición aproximada de APM Valencia
   const b = yard.boundary;
   if (b && b.length >= 3) {
@@ -391,7 +395,7 @@ function planNudge(k) {
   if (k === 'r-') plan.rot -= 0.5; if (k === 'r+') plan.rot += 0.5; if (k === 'R-') plan.rot -= 5; if (k === 'R+') plan.rot += 5; if (k === 'flip') plan.rot += 180;
   if (k === 's-') plan.mpp *= 0.99; if (k === 's+') plan.mpp *= 1.01; if (k === 'S-') plan.mpp *= 0.95; if (k === 'S+') plan.mpp *= 1.05;
   if (k === 'op') plan.op = plan.op >= 0.85 ? 0.5 : plan.op >= 0.5 ? 0.25 : 0.85;
-  if (k === 'fit') plan = planDefault();
+  if (k === 'fit') plan = planDefault(); if (k === 'bnd') plan = planFromBoundary();
   savePlan();
 }
 function bindPlan() {
