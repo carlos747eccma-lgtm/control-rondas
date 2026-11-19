@@ -217,6 +217,7 @@ function LeafletAdapter() {
     },
     lock(on) { ['dragging', 'touchZoom', 'doubleClickZoom', 'scrollWheelZoom', 'boxZoom', 'keyboard'].forEach(k => m[k] && m[k][on ? 'disable' : 'enable']()); },
     resize() { m.invalidateSize(); },
+    view(c, z) { if (c) m.setView([c.lat, c.lng], z, { animate: false }); },
     ships(list) {
       if (!gShips) { gShips = L.layerGroup().addTo(m); m.on('zoomend', () => this.ships(shipList)); } shipList = list; gShips.clearLayers();
       const c = m.getCenter(), pxm = Math.pow(2, m.getZoom()) / (156543.03 * Math.cos(c.lat * Math.PI / 180));
@@ -303,6 +304,7 @@ function GoogleAdapter(key) {
     ships(list) { shipList = list; if (shipOv) shipOv.draw(); },
     pxm() { const c = m.getCenter(), z = m.getZoom(); return Math.pow(2, z) / (156543.03 * Math.cos(c.lat() * Math.PI / 180)); },
     plan(p) { planCur = p; if (planOv) planOv.draw(); },
+    view(c, z, full) { if (full) { this._mt = this._mt || m.getMapTypeId(); m.setOptions({ disableDefaultUI: true, mapTypeId: 'satellite' }); } else if (this._mt) { m.setOptions({ disableDefaultUI: false, mapTypeId: this._mt, mapTypeControl: true, zoomControl: true, fullscreenControl: false, streetViewControl: false }); this._mt = null; } if (c) { m.setZoom(z); m.setCenter(LL(c)); } },
     lock(on) { m.setOptions({ gestureHandling: on ? 'none' : 'greedy', zoomControl: !on, keyboardShortcuts: !on, disableDoubleClickZoom: on }); },
     resize() { google.maps.event.trigger(m, 'resize'); },
     draft(pts) { draftArr.forEach(x => x.setMap(null)); draftArr = []; if (pts.length) { draftArr.push(new google.maps.Polyline({ map: m, path: pts.map(LL), strokeColor: COL.amb, strokeWeight: 3, clickable: false })); pts.forEach(p => draftArr.push(new google.maps.Marker({ map: m, position: LL(p), clickable: false, icon: { path: google.maps.SymbolPath.CIRCLE, scale: 5, fillColor: COL.amb, fillOpacity: 1, strokeWeight: 0 } }))); } }
@@ -355,7 +357,42 @@ function stopShips() {
 }
 document.addEventListener('visibilitychange', () => { if (!AIS_KEY) return; if (document.visibilityState === 'visible') startShips(); else if (RN) RN.shipsStop && RN.shipsStop().catch(() => { }); });
 
-let map, mapLocked = false;
+let map, mapLocked = false, zoneOn = false;
+/* ---------- Vista de la zona a pantalla completa: gira el mapa para que la zona quede vertical y la llena ---------- */
+function zoneShape() {
+  if (yard.boundary.length >= 3) return yard.boundary;
+  const p = plan || PLAN_GEO, kx = 111320 * Math.cos(p.lat * Math.PI / 180), r = -p.rot * Math.PI / 180; // esquinas del patio del plano
+  return [[PLAN_YARD.x0, PLAN_YARD.y0], [PLAN_YARD.x1, PLAN_YARD.y0], [PLAN_YARD.x1, PLAN_YARD.y1], [PLAN_YARD.x0, PLAN_YARD.y1]].map(([x, y]) => {
+    const u = (x - PLAN_W / 2) * p.mpp, v = -(y - PLAN_H / 2) * p.mpp, ex = u * Math.cos(r) - v * Math.sin(r), ey = u * Math.sin(r) + v * Math.cos(r);
+    return { lat: p.lat + ey / 111320, lng: p.lng + ex / kx };
+  });
+}
+function zoneFit() {
+  const el = $('map'), wrap = $('mapwrap'), W = wrap.clientWidth, H = wrap.clientHeight, pts = zoneShape();
+  const lat0 = pts.reduce((a, p) => a + p.lat, 0) / pts.length, lng0 = pts.reduce((a, p) => a + p.lng, 0) / pts.length, kx = 111320 * Math.cos(lat0 * Math.PI / 180);
+  const P = pts.map(p => [(p.lng - lng0) * kx, (p.lat - lat0) * 111320]);
+  let sxx = 0, syy = 0, sxy = 0; P.forEach(([x, y]) => { sxx += x * x; syy += y * y; sxy += x * y; });
+  const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy); // eje largo (radianes, antihorario desde el este)
+  const vertical = H >= W; // el eje largo va en la dimensión larga de la pantalla
+  let rot = (vertical ? Math.PI / 2 : 0) - ang; while (rot > Math.PI / 2) rot -= Math.PI; while (rot <= -Math.PI / 2) rot += Math.PI;
+  // extensión de la zona en el giro final
+  const R = P.map(([x, y]) => [x * Math.cos(rot) - y * Math.sin(rot), x * Math.sin(rot) + y * Math.cos(rot)]);
+  const x0 = Math.min(...R.map(p => p[0])), x1 = Math.max(...R.map(p => p[0])), y0 = Math.min(...R.map(p => p[1])), y1 = Math.max(...R.map(p => p[1]));
+  const need = Math.min((W - 24) / (x1 - x0), (H - 70) / (y1 - y0)); // píxeles por metro
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, bx = cx * Math.cos(-rot) - cy * Math.sin(-rot), by = cx * Math.sin(-rot) + cy * Math.cos(-rot);
+  const c = { lat: lat0 + by / 111320, lng: lng0 + bx / kx };
+  const zf = Math.log2(need * 156543.03 * Math.cos(c.lat * Math.PI / 180)), z = Math.min(21, Math.ceil(zf)), sc = Math.pow(2, zf - z); // zoom entero un poco mayor y se reduce: nitidez
+  const side = Math.ceil(Math.hypot(W, H) / sc) + 4;
+  Object.assign(el.style, { inset: 'auto', width: side + 'px', height: side + 'px', left: (W - side) / 2 + 'px', top: (H - side) / 2 + 'px', transform: 'rotate(' + (-rot * 180 / Math.PI) + 'deg) scale(' + sc + ')', transformOrigin: '50% 50%' });
+  map.resize && map.resize(); map.view(c, z, true);
+}
+function zoneView(on) {
+  zoneOn = on; document.body.classList.toggle('mapfull', on); document.body.classList.toggle('zonefull', on); $('bFull').classList.toggle('on', on);
+  const el = $('map');
+  if (on) { map.lock && map.lock(true); setTimeout(zoneFit, 150); banner('Vista de la zona completa. Pulsa ⛶ para volver al mapa normal.', '', 3500); }
+  else { Object.assign(el.style, { inset: '', width: '', height: '', left: '', top: '', transform: '', transformOrigin: '' }); setTimeout(() => { map.resize && map.resize(); map.view(null, 0, false); map.lock && map.lock(mapLocked); const r = run, pts = [].concat(zoneShape(), (r && r.track) || []); map.fit(pts); }, 150); }
+}
+window.addEventListener('resize', () => { if (zoneOn) setTimeout(zoneFit, 200); });
 /* ---------- Plano de la terminal (foto de la pantalla de control, enderezada) ---------- */
 const PLAN_W = 3072, PLAN_H = 1200;
 // recinto del patio dentro de la imagen (px): para encajarlo con el límite dibujado
@@ -1282,7 +1319,7 @@ function bind() {
     if (mapLocked) { const r = viewing || run, pts = [].concat(yard.boundary, (r && r.track) || []); if (pts.length) map.fit(pts); banner('Mapa fijo: muestra toda la zona y el recorrido. Pulsa 🔒 para moverlo otra vez.', '', 4000); }
     map.lock && map.lock(mapLocked);
   };
-  $('bFull').onclick = () => { document.body.classList.toggle('mapfull'); $('bFull').classList.toggle('on', document.body.classList.contains('mapfull')); setTimeout(() => { map.resize && map.resize(); if (mapLocked) $('bLock').onclick(), $('bLock').onclick(); }, 120); };
+  $('bFull').onclick = () => zoneView(!zoneOn);
   bindPlan();
   $('bRelevo').onclick = () => setRelevo(!(run && run.relevo));
   $('bBeep').onclick = () => { if (RN) { RN.test(); banner('Apaga la pantalla: en 10 s suena la alarma de prueba', '', 8000); return; } SND.alarm(); notify([{ id: 9199, at: Date.now() + 10000, title: 'Prueba de alarma', body: 'Así suena la alarma con la pantalla apagada' }]); if (LN) banner('Apaga la pantalla: en 10 s suena la alarma de prueba', '', 8000); };

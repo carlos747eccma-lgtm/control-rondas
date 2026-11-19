@@ -55,6 +55,7 @@ body.planadj #banner{top:104px}
 #planBar{position:absolute;left:6px;right:6px;top:6px;z-index:960;display:none;flex-wrap:wrap;gap:4px;background:rgba(11,18,32,.94);border:1px solid #22d3ee;border-radius:10px;padding:6px}#planBar button{flex:1 0 auto;min-width:40px;height:34px;border-radius:8px;border:1px solid var(--line);background:var(--surface2);color:var(--txt);font:600 13px system-ui}#planBar .ok{background:#22d3ee;color:#000;border-color:#22d3ee}
 #bLock,#bFull{position:absolute;right:10px;z-index:900;width:42px;height:42px;border-radius:10px;border:1px solid var(--line);background:rgba(11,18,32,.92);color:#e8edf6;font-size:18px;display:grid;place-items:center}#bLock{bottom:108px}#bFull{bottom:158px}#bLock.on,#bFull.on{border-color:#22d3ee;background:rgba(8,51,68,.95)}
 body.mapfull #mapwrap{position:fixed;inset:0;z-index:2000;min-height:0}
+body.zonefull #mapwrap{overflow:hidden;background:#0b1220}body.zonefull #bLock,body.zonefull .mapchips{display:none}
 #ships{position:absolute;right:10px;bottom:58px;z-index:900;height:42px;min-width:42px;padding:0 8px;border-radius:10px;border:1px solid var(--line);background:rgba(11,18,32,.92);color:#e8edf6;font:700 13px system-ui;display:flex;align-items:center;gap:4px}#ships.on{border-color:#22d3ee;color:#22d3ee}#ships[hidden]{display:none}
 #locate{position:absolute;right:10px;bottom:8px;z-index:900;width:42px;height:42px;border-radius:10px;border:1px solid var(--line);background:rgba(11,18,32,.92);display:grid;place-items:center}
 .mode-edit #map{outline:3px solid var(--warn);outline-offset:-3px}
