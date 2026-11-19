@@ -26,8 +26,8 @@ const NUM = { label: 'Matrícula (opcional)', id: 'mat' };
 // Operativas con formulario propio; el resto: Inicio / Finalizó + nota
 const OPS = [
   { n: '01 APERTURA PUERTA DE RESIDUOS O ALMACÉN', f: [{ id: 'det', label: 'Detalle', ph: 'Ej.: apertura puerta 4 y 5' }] },
-  { n: '01 REGISTRO LLAVES RODI' },
-  { n: '02 REGISTRO LLAVES NAUTIC' },
+  { n: '01 REGISTRO LLAVES RODI', f: [{ id: 'nom', label: 'Nombre de la persona', pre: 'persona ' }, { id: 'dni', label: 'DNI o NIE', upper: 1, pre: 'DNI ' }] },
+  { n: '02 REGISTRO LLAVES NAUTIC', f: [{ id: 'nom', label: 'Nombre de la persona', pre: 'persona ' }, { id: 'dni', label: 'DNI o NIE', upper: 1, pre: 'DNI ' }] },
   { n: '03 OPERATIVA REVISIONES DE VEHÍCULOS', f: [NUM] },
   { n: '04 CONTENEDORES CORRALITO', f: [{ id: 'cont', label: 'Nº de contenedor (opcional)', ph: '4 letras + 7 cifras' }] },
   { n: '04 REVISIONES Y REGISTROS DE CABINAS Y ANULACIONES', f: [NUM] },
@@ -111,8 +111,16 @@ function roOp(op) {
     v => { roAdd('Accede la visita ' + v.nom + (v.para ? ' para ' + v.para : '') + '.', 'visita'); });
   if (op.form === 'precintos') return roForm(n, [{ id: 'ord', label: 'Nº del precinto de orden' }, { id: 'fis', label: 'Nº del precinto físico' }, { id: 'cont', label: 'Matrícula del contenedor', ph: '4 letras + 7 cifras', upper: 1 }],
     v => { roAdd(n + ': ' + [v.ord && 'precinto de orden ' + v.ord, v.fis && 'precinto físico ' + v.fis, v.cont && 'matrícula contenedor ' + v.cont].filter(Boolean).join(', ') + '.', 'op'); });
-  if (op.form === 'anulacion') return roForm('Anulación de carga (entrada / salida)', [{ id: 'es', label: 'Tipo', choice: ['Entrada', 'Salida'] }, { id: 'mat', label: 'Matrícula', upper: 1 }, { id: 'cont', label: 'Nº de contenedor (opcional)', upper: 1, ph: '4 letras + 7 cifras' }, { id: 'mot', label: 'Motivo', choice: ['Avería', 'Cliente anula', 'Contenedor roto', 'Empresa anula', 'Plataforma incorrecta', 'Se acaba el disco', 'Otro'] }, { id: 'motx', label: 'Escribe el motivo (si es otro)' }],
-    v => { const mot = v.mot === 'Otro' ? (v.motx || 'otro') : v.mot; roAdd('Anulación de carga (' + v.es.toLowerCase() + ')' + (v.mat ? ', matrícula ' + v.mat : '') + (v.cont ? ', contenedor ' + v.cont : '') + ', motivo: ' + mot + '.', 'op'); });
+  if (op.form === 'anulacion') return roForm('Anulación de carga (entrada / salida)', [
+    { id: 'es', label: 'Tipo', choice: ['Entrada', 'Salida'] }, { id: 'pta', label: 'Nº de puerta (de la entrada o de la salida)', type: 'number', req: 1, reqMsg: 'Pon el número de la puerta de entrada o salida' },
+    { id: 'cn', label: 'Nombre del conductor', req: 1, reqMsg: 'Falta el nombre del conductor' }, { id: 'cd', label: 'DNI / NIE del conductor', upper: 1, req: 1, reqMsg: 'Falta el DNI / NIE del conductor' },
+    { id: 'emp', label: 'Empresa / transportista', v: LS.get('last_anul_empresa', '') }, { id: 'mat', label: 'Matrícula', upper: 1 },
+    { id: 'cont', label: 'Nº de contenedor (opcional)', upper: 1, ph: '4 letras + 7 cifras' },
+    { id: 'mot', label: 'Motivo', choice: ['Avería', 'Cliente anula', 'Contenedor roto', 'Empresa anula', 'Plataforma incorrecta', 'Se acaba el disco', 'Otro'] }, { id: 'motx', label: 'Escribe el motivo (si es otro)' }],
+    v => {
+      const mot = v.mot === 'Otro' ? (v.motx || 'otro') : v.mot; if (v.emp) LS.set('last_anul_empresa', v.emp);
+      roAdd('Anulación de carga (' + v.es.toLowerCase() + ' por puerta ' + v.pta + '). Conductor ' + v.cn + ', DNI ' + v.cd + (v.emp ? ', empresa ' + v.emp : '') + (v.mat ? ', matrícula ' + v.mat : '') + (v.cont ? ', contenedor ' + v.cont : '') + ', motivo: ' + mot + '.', 'op');
+    });
   if (op.form === 'conductor') return roForm(n, [
     { id: 'cn', label: 'Nombre del conductor' }, { id: 'cd', label: 'DNI / NIE del conductor', upper: 1 },
     { id: 'an', label: 'Nombre del acompañante' }, { id: 'ad', label: 'DNI / NIE del acompañante', upper: 1 },
@@ -129,7 +137,7 @@ function roOp(op) {
     }, { hint: 'Pon la de entrada, la de salida o las dos.' });
   // genérica: Inicio / Finalizó + campos opcionales
   roForm(n, [IF].concat(op.f || []), v => {
-    const extra = (op.f || []).map(f => v[f.id] ? (f.id === 'buque' ? 'buque ' : f.id === 'mat' ? 'matrícula ' : f.id === 'cont' ? 'contenedor ' : f.id === 'zonas' ? 'zonas ' : '') + v[f.id] : '').filter(Boolean).join(', ');
+    const extra = (op.f || []).map(f => v[f.id] ? (f.pre !== undefined ? f.pre : f.id === 'buque' ? 'buque ' : f.id === 'mat' ? 'matrícula ' : f.id === 'cont' ? 'contenedor ' : f.id === 'zonas' ? 'zonas ' : '') + v[f.id] : '').filter(Boolean).join(', ');
     roAdd((v.fase === 'Inicio' ? 'Inicio ' : 'Finalizó ') + n + (extra ? ', ' + extra : '') + '.', 'op');
   }, { hint: 'Se guarda con la hora actual. Elige Inicio o Finalizó.' });
 }
