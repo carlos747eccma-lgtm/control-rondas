@@ -32,7 +32,7 @@ button{font:inherit;color:inherit;cursor:pointer}
 .pill.ok::before{animation:pulse 1.6s infinite}
 @keyframes pulse{50%{opacity:.25}}
 #shift{display:flex;gap:8px;align-items:center;padding:6px 12px;background:var(--surface);border-bottom:1px solid var(--line);font-size:12px;color:var(--mut)}
-#shift .bar{flex:1;height:5px;background:var(--surface2);border-radius:3px;overflow:hidden;min-width:40px}
+#shift .bar{flex:1;height:5px;background:var(--surface2);border-radius:3px;overflow:hidden;min-width:12px}#shift{overflow:hidden}#shift .shiftbtn{flex-shrink:0}#shift #bShift{flex-shrink:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
 #shift .bar i{display:block;height:100%;background:var(--acc);width:0}
 #kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);border-bottom:1px solid var(--line)}
 .kpi{background:var(--surface);padding:8px 8px 7px;min-width:0}
@@ -149,7 +149,7 @@ input,select{width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(
     <span id="status" class="pill idle">—</span>
     <span id="clock" class="num">--:--</span>
   </header>
-  <div id="shift"><button id="bShift" class="shiftbtn"><span id="shiftLbl" class="num">Turno</span> <b>▾</b></button><div class="bar"><i id="shiftBar"></i></div><span id="guardLbl"></span><button id="bRelevo" class="shiftbtn relevo">Modo relevo</button></div>
+  <div id="shift"><button id="bShift" class="shiftbtn"><span id="shiftLbl" class="num">Turno</span> <b>▾</b></button><div class="bar"><i id="shiftBar"></i></div><span id="guardLbl"></span><button id="bRelevo" class="shiftbtn relevo">Modo relevo</button><button id="bPdfTop" class="shiftbtn" title="Informe PDF del turno en curso">📄 PDF</button></div>
   <section id="kpis">
     <div class="kpi" id="kRounds"><span>Rondas</span><b class="num">0</b><em>&nbsp;</em></div>
     <div class="kpi" id="kComp"><span>Puntos OK</span><b class="num">–</b><em>&nbsp;</em></div>

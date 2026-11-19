@@ -1323,6 +1323,7 @@ function bind() {
   bindPlan();
   $('bRelevo').onclick = () => setRelevo(!(run && run.relevo));
   $('bBeep').onclick = () => { if (RN) { RN.test(); banner('Apaga la pantalla: en 10 s suena la alarma de prueba', '', 8000); return; } SND.alarm(); notify([{ id: 9199, at: Date.now() + 10000, title: 'Prueba de alarma', body: 'Así suena la alarma con la pantalla apagada' }]); if (LN) banner('Apaga la pantalla: en 10 s suena la alarma de prueba', '', 8000); };
+  $('bPdfTop').onclick = () => { banner('Preparando el informe PDF…', '', 3000); sharePdf(cur()).catch(err => banner('No se pudo crear el PDF: ' + err.message, 'bad', 5000)); };
   $('bReportNow').onclick = () => sharePdf(cur()).catch(err => banner('No se pudo crear el PDF: ' + err.message, 'bad', 5000));
   $('bXlsNow').onclick = () => shareXlsx(cur()).catch(err => banner('No se pudo crear el Excel: ' + err.message, 'bad', 5000));
   $('bXlsAll').onclick = () => shareAllXlsx().catch(err => banner('No se pudo crear el Excel: ' + err.message, 'bad', 5000));
