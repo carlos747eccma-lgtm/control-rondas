@@ -49,6 +49,10 @@ button{font:inherit;color:inherit;cursor:pointer}
 .chipbox{background:rgba(11,18,32,.9);border:1px solid var(--line);border-radius:8px;padding:4px 8px;font-size:11px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .chipbox i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:3px;vertical-align:-1px}
 #gpsdot{font-weight:700}
+#bPlan{position:absolute;right:10px;bottom:208px;z-index:900;width:42px;height:42px;border-radius:10px;border:1px solid var(--line);background:rgba(11,18,32,.92);color:#e8edf6;font-size:18px;display:grid;place-items:center}#bPlan.on{border-color:#22d3ee;background:rgba(8,51,68,.95)}
+#planDrag{position:absolute;inset:0;z-index:950;display:none;touch-action:none;cursor:move;outline:3px dashed #22d3ee;outline-offset:-3px}
+body.planadj #banner{top:104px}
+#planBar{position:absolute;left:6px;right:6px;top:6px;z-index:960;display:none;flex-wrap:wrap;gap:4px;background:rgba(11,18,32,.94);border:1px solid #22d3ee;border-radius:10px;padding:6px}#planBar button{flex:1 0 auto;min-width:40px;height:34px;border-radius:8px;border:1px solid var(--line);background:var(--surface2);color:var(--txt);font:600 13px system-ui}#planBar .ok{background:#22d3ee;color:#000;border-color:#22d3ee}
 #bLock,#bFull{position:absolute;right:10px;z-index:900;width:42px;height:42px;border-radius:10px;border:1px solid var(--line);background:rgba(11,18,32,.92);color:#e8edf6;font-size:18px;display:grid;place-items:center}#bLock{bottom:108px}#bFull{bottom:158px}#bLock.on,#bFull.on{border-color:#22d3ee;background:rgba(8,51,68,.95)}
 body.mapfull #mapwrap{position:fixed;inset:0;z-index:2000;min-height:0}
 #ships{position:absolute;right:10px;bottom:58px;z-index:900;height:42px;min-width:42px;padding:0 8px;border-radius:10px;border:1px solid var(--line);background:rgba(11,18,32,.92);color:#e8edf6;font:700 13px system-ui;display:flex;align-items:center;gap:4px}#ships.on{border-color:#22d3ee;color:#22d3ee}#ships[hidden]{display:none}
@@ -156,6 +160,9 @@ input,select{width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(
   <div id="mapwrap">
     <div id="map"></div>
     <div id="banner"></div>
+    <div id="planDrag"></div>
+    <div id="planBar"><button data-pn="R-">⟲5°</button><button data-pn="r-">⟲</button><button data-pn="r+">⟳</button><button data-pn="R+">⟳5°</button><button data-pn="flip">180°</button><button data-pn="S-">−−</button><button data-pn="s-">−</button><button data-pn="s+">+</button><button data-pn="S+">++</button><button data-pn="op">Transp.</button><button data-pn="fit">Al límite</button><button data-pn="ok" class="ok">Hecho</button></div>
+    <button id="bPlan" title="Plano de la terminal" aria-label="Plano de la terminal">🗺</button>
     <button id="bFull" title="Mapa a pantalla completa" aria-label="Mapa a pantalla completa">⛶</button>
     <button id="bLock" title="Dejar el mapa fijo con todo el recorrido" aria-label="Dejar el mapa fijo">🔓</button>
     <button id="ships" hidden title="Barcos en tiempo real (AIS)" aria-label="Barcos en tiempo real">🚢<span id="shipsN"></span></button>
@@ -215,6 +222,7 @@ input,select{width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(
         <button class="btn sm" id="bPoint">+ Punto de control</button>
         <button class="btn sm" id="bExit">+ Salida exterior</button>
       </div>
+      <div class="row"><button class="btn sm pri" id="bPlanAdj">Ajustar plano de la terminal sobre el satélite</button></div>
       <div class="row" id="drawRow" style="display:none">
         <button class="btn sm" id="bUndo">Deshacer</button>
         <button class="btn pri sm" id="bDone">Terminar límite</button>

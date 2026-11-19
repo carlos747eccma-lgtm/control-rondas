@@ -178,7 +178,7 @@ function LeafletAdapter() {
     L.DomUtil.setPosition(canvas, m.containerPointToLayerPoint([0, 0]));
     drawCoverage(canvas.getContext('2d'), p => m.latLngToContainerPoint([p.lat, p.lng]), s.x, s.y);
   }
-  let gShips = null, shipList = [];
+  let gShips = null, shipList = [], planEl = null, planCur = null;
   function cov() { if (!covT) covT = setTimeout(paint, 300); }
   return {
     name: 'leaflet',
@@ -208,6 +208,13 @@ function LeafletAdapter() {
     stops(list) { gStops.clearLayers(); list.forEach(s => s.sp ? L.marker([s.lat, s.lng], { icon: L.divIcon({ className: '', iconSize: null, html: spHtml(s) }) }).on('click', () => banner(spTxt(s), 'bad', 5000)).addTo(gStops) : L.circleMarker([s.lat, s.lng], { radius: 6 + Math.min(10, s.dur / 60000), color: '#000', weight: 1, fillColor: COL.amb, fillOpacity: .95 }).bindTooltip(fmtDur(s.dur) + ' parado').addTo(gStops)); },
     points(list) { gExits.clearLayers(); list.forEach(e => L.marker([e.lat, e.lng], { icon: L.divIcon({ className: '', iconSize: null, html: cpHtml(e) }) }).on('click', () => focusPoint(e.id)).addTo(gExits)); },
     draft(pts) { gDraft.clearLayers(); if (pts.length) { L.polyline(pts.map(p => [p.lat, p.lng]), { color: COL.amb, weight: 3 }).addTo(gDraft); pts.forEach(p => L.circleMarker([p.lat, p.lng], { radius: 5, color: COL.amb, fillOpacity: 1 }).addTo(gDraft)); } },
+    pxm() { const c = m.getCenter(); return Math.pow(2, m.getZoom()) / (156543.03 * Math.cos(c.lat * Math.PI / 180)); },
+    plan(p) {
+      if (!planEl) { m.createPane('plan').style.zIndex = 250; planEl = L.DomUtil.create('img', 'leaflet-zoom-hide'); planEl.src = 'plano-apm.jpg'; planEl.style.cssText = 'position:absolute;pointer-events:none;transform-origin:50% 50%;max-width:none'; m.getPane('plan').appendChild(planEl); m.on('zoomend moveend viewreset resize', () => this.plan(planCur)); }
+      planCur = p; if (!p || !p.on) { planEl.style.display = 'none'; return; }
+      const q = m.latLngToLayerPoint([p.lat, p.lng]), w = PLAN_W * p.mpp * this.pxm();
+      Object.assign(planEl.style, { display: 'block', left: q.x + 'px', top: q.y + 'px', width: w + 'px', opacity: p.op, transform: 'translate(-50%,-50%) rotate(' + p.rot + 'deg)' });
+    },
     lock(on) { ['dragging', 'touchZoom', 'doubleClickZoom', 'scrollWheelZoom', 'boxZoom', 'keyboard'].forEach(k => m[k] && m[k][on ? 'disable' : 'enable']()); },
     resize() { m.invalidateSize(); },
     ships(list) {
@@ -219,7 +226,7 @@ function LeafletAdapter() {
 }
 
 function GoogleAdapter(key) {
-  let m, boundary, track, me, meAcc, stopsList = [], draftArr = [], ov, ptsOv, ptsList = [], covT = 0, shipOv, shipList = [];
+  let m, boundary, track, me, meAcc, stopsList = [], draftArr = [], ov, ptsOv, ptsList = [], covT = 0, shipOv, shipList = [], planOv, planCur = null;
   function cov() { if (!covT) covT = setTimeout(() => { covT = 0; ov && ov.draw(); }, 300); }
   const LL = p => ({ lat: p.lat, lng: p.lng });
   return {
@@ -259,6 +266,15 @@ function GoogleAdapter(key) {
             this.d.innerHTML = shipList.map(s => { const q = pr.fromLatLngToDivPixel(new google.maps.LatLng(s.lat, s.lng)); return '<div style="position:absolute;left:' + q.x + 'px;top:' + q.y + 'px">' + shipHtml(s, pxm) + '</div>'; }).join('');
           };
           shipOv.setMap(m);
+          // plano de la terminal (foto enderezada), encima del satélite y debajo de todo lo demás
+          planOv = new google.maps.OverlayView();
+          planOv.onAdd = function () { this.i = document.createElement('img'); this.i.src = 'plano-apm.jpg'; this.i.style.cssText = 'position:absolute;pointer-events:none;transform-origin:50% 50%;max-width:none;display:none'; this.getPanes().mapPane.appendChild(this.i); };
+          planOv.draw = function () {
+            const pr = this.getProjection(), p = planCur; if (!pr || !this.i) return; if (!p || !p.on) { this.i.style.display = 'none'; return; }
+            const q = pr.fromLatLngToDivPixel(new google.maps.LatLng(p.lat, p.lng)), b = pr.fromLatLngToDivPixel(new google.maps.LatLng(p.lat + 100 / 111320, p.lng)), pxm = Math.abs(q.y - b.y) / 100;
+            Object.assign(this.i.style, { display: 'block', left: q.x + 'px', top: q.y + 'px', width: PLAN_W * p.mpp * pxm + 'px', opacity: p.op, transform: 'translate(-50%,-50%) rotate(' + p.rot + 'deg)' });
+          };
+          planOv.setMap(m);
           m.addListener('idle', () => ov.draw());
           res();
         };
@@ -285,6 +301,8 @@ function GoogleAdapter(key) {
     stops(list) { stopsList = list; if (ptsOv) ptsOv.draw(); },
     points(list) { ptsList = list; if (ptsOv) ptsOv.draw(); },
     ships(list) { shipList = list; if (shipOv) shipOv.draw(); },
+    pxm() { const c = m.getCenter(), z = m.getZoom(); return Math.pow(2, z) / (156543.03 * Math.cos(c.lat() * Math.PI / 180)); },
+    plan(p) { planCur = p; if (planOv) planOv.draw(); },
     lock(on) { m.setOptions({ gestureHandling: on ? 'none' : 'greedy', zoomControl: !on, keyboardShortcuts: !on, disableDoubleClickZoom: on }); },
     resize() { google.maps.event.trigger(m, 'resize'); },
     draft(pts) { draftArr.forEach(x => x.setMap(null)); draftArr = []; if (pts.length) { draftArr.push(new google.maps.Polyline({ map: m, path: pts.map(LL), strokeColor: COL.amb, strokeWeight: 3, clickable: false })); pts.forEach(p => draftArr.push(new google.maps.Marker({ map: m, position: LL(p), clickable: false, icon: { path: google.maps.SymbolPath.CIRCLE, scale: 5, fillColor: COL.amb, fillOpacity: 1, strokeWeight: 0 } }))); } }
@@ -338,6 +356,56 @@ function stopShips() {
 document.addEventListener('visibilitychange', () => { if (!AIS_KEY) return; if (document.visibilityState === 'visible') startShips(); else if (RN) RN.shipsStop && RN.shipsStop().catch(() => { }); });
 
 let map, mapLocked = false;
+/* ---------- Plano de la terminal (foto de la pantalla de control, enderezada) ---------- */
+const PLAN_W = 3072, PLAN_H = 1200;
+// recinto del patio dentro de la imagen (px): para encajarlo con el límite dibujado
+const PLAN_YARD = { x0: 200, x1: 3030, y0: 210, y1: 904 };
+let plan = LS.get('rp_plan', null), planAdj = false;
+function planDefault() {
+  // si hay límite dibujado, se encaja el patio del plano con él (eje largo del límite); si no, posición aproximada de APM Valencia
+  const b = yard.boundary;
+  if (b && b.length >= 3) {
+    const lat0 = b.reduce((a, p) => a + p.lat, 0) / b.length, lng0 = b.reduce((a, p) => a + p.lng, 0) / b.length, kx = 111320 * Math.cos(lat0 * Math.PI / 180), ky = 111320;
+    const P = b.map(p => [(p.lng - lng0) * kx, (p.lat - lat0) * ky]);
+    let sxx = 0, syy = 0, sxy = 0; P.forEach(([x, y]) => { sxx += x * x; syy += y * y; sxy += x * y; });
+    const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy), ux = Math.cos(ang), uy = Math.sin(ang);
+    const proj = P.map(([x, y]) => [x * ux + y * uy, -x * uy + y * ux]), u0 = Math.min(...proj.map(p => p[0])), u1 = Math.max(...proj.map(p => p[0])), v0 = Math.min(...proj.map(p => p[1])), v1 = Math.max(...proj.map(p => p[1]));
+    const mpp = (u1 - u0) / (PLAN_YARD.x1 - PLAN_YARD.x0);
+    // centro del patio en metros y desplazamiento del centro de la imagen respecto al del patio
+    const cu = (u0 + u1) / 2, cv = (v0 + v1) / 2, du = (PLAN_W / 2 - (PLAN_YARD.x0 + PLAN_YARD.x1) / 2) * mpp, dv = -(PLAN_H / 2 - (PLAN_YARD.y0 + PLAN_YARD.y1) / 2) * mpp;
+    const U = cu + du, V = cv + dv, x = U * ux - V * uy, y = U * uy + V * ux;
+    return { on: true, op: 0.85, mpp, rot: -ang * 180 / Math.PI, lat: lat0 + y / ky, lng: lng0 + x / kx };
+  }
+  return { on: true, op: 0.85, mpp: 0.5, rot: -38, lat: 39.4405, lng: -0.3165 };
+}
+function drawPlan() { if (map && map.plan) map.plan(plan); const b = $('bPlan'); if (b) b.classList.toggle('on', !!(plan && plan.on)); }
+function savePlan() { LS.set('rp_plan', plan); drawPlan(); }
+function planAdjust(on) {
+  planAdj = on; $('planBar').style.display = on ? 'flex' : 'none'; $('planDrag').style.display = on ? 'block' : 'none';
+  document.body.classList.toggle('mapfull', on); document.body.classList.toggle('planadj', on); $('bFull').classList.toggle('on', on); setTimeout(() => { map.resize && map.resize(); drawPlan(); }, 150);
+  if (on) { if (!plan) plan = planDefault(); plan.on = true; savePlan(); switchTab('pControl'); map.center({ lat: plan.lat, lng: plan.lng }, 16); banner('Arrastra el plano con el dedo hasta que cuadre con el satélite. Usa los botones para girar y cambiar el tamaño.', '', 7000); }
+  else savePlan();
+}
+function planNudge(k) {
+  if (!plan) return;
+  if (k === 'r-') plan.rot -= 0.5; if (k === 'r+') plan.rot += 0.5; if (k === 'R-') plan.rot -= 5; if (k === 'R+') plan.rot += 5; if (k === 'flip') plan.rot += 180;
+  if (k === 's-') plan.mpp *= 0.99; if (k === 's+') plan.mpp *= 1.01; if (k === 'S-') plan.mpp *= 0.95; if (k === 'S+') plan.mpp *= 1.05;
+  if (k === 'op') plan.op = plan.op >= 0.85 ? 0.5 : plan.op >= 0.5 ? 0.25 : 0.85;
+  if (k === 'fit') plan = planDefault();
+  savePlan();
+}
+function bindPlan() {
+  const d = $('planDrag'); let last = null;
+  d.addEventListener('pointerdown', e => { last = [e.clientX, e.clientY]; d.setPointerCapture(e.pointerId); });
+  d.addEventListener('pointermove', e => {
+    if (!last || !plan) return; const dx = e.clientX - last[0], dy = e.clientY - last[1]; last = [e.clientX, e.clientY];
+    const pxm = map.pxm(); plan.lat -= dy / pxm / 111320; plan.lng += dx / pxm / (111320 * Math.cos(plan.lat * Math.PI / 180)); drawPlan();
+  });
+  ['pointerup', 'pointercancel'].forEach(ev => d.addEventListener(ev, () => { if (last) savePlan(); last = null; }));
+  $('planBar').onclick = e => { const b = e.target.closest('[data-pn]'); if (!b) return; if (b.dataset.pn === 'ok') planAdjust(false); else planNudge(b.dataset.pn); };
+  $('bPlanAdj').onclick = () => planAdjust(true);
+  $('bPlan').onclick = () => { if (!plan) { plan = planDefault(); plan.on = true; } else plan.on = !plan.on; savePlan(); };
+}
 async function initMap() {
   const center = yard.boundary[0] || LS.get('rp_lastpos', VLC);
   const zoom = yard.boundary.length ? 17 : 16;
@@ -1203,6 +1271,7 @@ function bind() {
     map.lock && map.lock(mapLocked);
   };
   $('bFull').onclick = () => { document.body.classList.toggle('mapfull'); $('bFull').classList.toggle('on', document.body.classList.contains('mapfull')); setTimeout(() => { map.resize && map.resize(); if (mapLocked) $('bLock').onclick(), $('bLock').onclick(); }, 120); };
+  bindPlan();
   $('bRelevo').onclick = () => setRelevo(!(run && run.relevo));
   $('bBeep').onclick = () => { if (RN) { RN.test(); banner('Apaga la pantalla: en 10 s suena la alarma de prueba', '', 8000); return; } SND.alarm(); notify([{ id: 9199, at: Date.now() + 10000, title: 'Prueba de alarma', body: 'Así suena la alarma con la pantalla apagada' }]); if (LN) banner('Apaga la pantalla: en 10 s suena la alarma de prueba', '', 8000); };
   $('bReportNow').onclick = () => sharePdf(cur()).catch(err => banner('No se pudo crear el PDF: ' + err.message, 'bad', 5000));
@@ -1239,7 +1308,7 @@ function fillCfg() { Object.keys(DEF_CFG).forEach(k => { if ($(k)) $(k).value = 
     if (saved && !saved.end) { run = Object.assign(newRun(), saved); redrawYard(); finishRun(); }
     run = null; startRun();
   }
-  renderEvents(); renderHist(); renderAll(); startShips(); renderRelevo(); if (RN && RN.relevo && run && run.relevo) RN.relevo({ on: true }).catch(() => { });
+  renderEvents(); renderHist(); renderAll(); startShips(); drawPlan(); renderRelevo(); if (RN && RN.relevo && run && run.relevo) RN.relevo({ on: true }).catch(() => { });
   setInterval(() => {
     if (run && !run.end && !viewing && !simTimer && nowT() >= run.periodEnd) { finishRun(); startRun(); renderEvents(); }
     checkOverdue(); renderAll();
